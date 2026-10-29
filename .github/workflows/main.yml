@@ -28,7 +28,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          flutter-version: '3.24.0'
 
       - name: Accept Android Licenses & Setup
         run: |
@@ -36,12 +36,13 @@ jobs:
           flutter config --no-analytics
 
       - name: Install Flet
-        run: pip install flet flet-cli
+        run: pip install flet
 
       - name: Build APK
-        run: yes | flet build apk --yes
+        run: flet build apk --yes -v
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Sierra-APK
+          path: build/apk/*.apk
