@@ -1,46 +1,31 @@
-name: Build Flet Android APK
+name: Build Flet APK
 
 on:
-push:
-branches:
-- main
-workflow_dispatch:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-build:
-runs-on: ubuntu-latest
-
-steps:
-  - name: Checkout Code
-    uses: actions/checkout@v4
-
-  - name: Set up Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: '3.10'
-
-  - name: Set up Java / JDK
-    uses: actions/setup-java@v4
-    with:
-      java-version: '17'
-      distribution: 'temurin'
-
-  - name: Install Flutter
-    uses: subosito/flutter-action@v2
-    with:
-      flutter-version: '3.22.x'
-
-  - name: Install Dependencies & Flet
-    run: |
-      python -m pip install --upgrade pip
-      pip install flet
-
-  - name: Build APK
-    run: |
-      flet build apk
-
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: Sierra-Release-APK
-      path: build/apk/*.apk
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.22.x'
+    - name: Install Flet
+      run: pip install flet
+    - name: Build APK
+      run: flet build apk
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: Sierra-APK
+        path: build/apk/*.apk
