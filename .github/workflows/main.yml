@@ -30,7 +30,7 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      - name: Setup Android SDK & Licenses
+      - name: Accept Android Licenses & Setup
         run: |
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
@@ -40,9 +40,7 @@ jobs:
         run: pip install flet
 
       - name: Build APK
-        env:
-          CI: true
-        run: flet build apk --yes --no-interactive -v
+        run: flet build apk --yes
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
