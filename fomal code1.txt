@@ -1,0 +1,4441 @@
+import hashlib
+import os
+import secrets
+import shutil
+import sqlite3
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Sequence
+
+import flet as ft
+
+
+# ===========================================================================
+# CONFIGURATION
+# ===========================================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("SIERRA_DB_PATH",
+                         os.path.join(BASE_DIR, "sierra_store.db"))
+BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+VALID_ROLES = (ROLE_ADMIN, ROLE_USER)
+INVOICE_START_NUMBER = 1000
+
+DEFAULT_SETTINGS = {
+    "shop_name": "SIERRA STORE",
+    "invoice_header": "SIERRA STORE\nملابس بالجملة",
+    "invoice_footer": "شكراً لتعاملكم معنا!\nالبضاعة لا تُرد بعد 3 أيام.",
+    "receipt_width_mm": "80",
+    "currency_symbol": "ج.م",
+    "printer_name": "",
+    "printer_paper_width": "80mm",
+    "printer_font_size": "12",
+}
+
+SEASON_NAMES = ["الموسم الشتوي", "موسم رمضان", "الموسم الصيفي"]
+
+
+# ===========================================================================
+# STYLE CONSTANTS
+# ===========================================================================
+BG_BLACK = "#050505"
+BG_SURFACE = "#0a0a0a"
+BG_SIDEBAR = "#0d0d0d"
+BG_CARD = "#1e1e1e"
+BG_CARD_HOVER = "#2a2a2a"
+BG_INPUT = "#1a1a1a"
+BG_HEADER = "#0d0d0d"
+BORDER = "#2e2e2e"
+BORDER_HOVER = "#4a4a4a"
+BORDER_FOCUS = "#ffffff"
+TEXT_PRIMARY = "#ffffff"
+TEXT_SECONDARY = "#b5b5b5"
+TEXT_MUTED = "#767676"
+ACCENT = "#ffffff"
+ACCENT_HOVER = "#d4d4d4"
+DANGER = "#ff4d4d"
+SUCCESS = "#3ddc84"
+WARNING = "#ffb340"
+INFO = "#4d9fff"
+SP_XS, SP_SM, SP_MD, SP_LG, SP_XL = 4, 8, 16, 24, 32
+RADIUS_SM, RADIUS_MD, RADIUS_LG = 6, 10, 16
+SIDEBAR_WIDTH = 260
+HEADER_HEIGHT = 76
+
+FS_TITLE = 24
+FS_SECTION = 16
+FS_BODY = 14
+FS_SMALL = 13
+FS_TINY = 12
+BTN_H = 44
+BTN_PAD_H = 18
+BTN_PAD_V = 10
+
+
+# ===========================================================================
+# STYLE HELPERS
+# ===========================================================================
+
+def _hover_card(e: ft.ControlEvent) -> None:
+    active = e.data == "true"
+    e.control.bgcolor = BG_CARD_HOVER if active else BG_CARD
+    e.control.border = ft.border.all(1, BORDER_HOVER if active else BORDER)
+    e.control.update()
+
+
+def _hover_primary(e: ft.ControlEvent) -> None:
+    e.control.bgcolor = ACCENT_HOVER if e.data == "true" else ACCENT
+    e.control.update()
+
+
+def _hover_ghost(e: ft.ControlEvent) -> None:
+    active = e.data == "true"
+    e.control.bgcolor = BG_CARD_HOVER if active else "transparent"
+    e.control.border = ft.border.all(1, BORDER_HOVER if active else BORDER)
+    e.control.update()
+
+
+def _hover_danger(e: ft.ControlEvent) -> None:
+    active = e.data == "true"
+    e.control.bgcolor = "#3a1414" if active else "transparent"
+    e.control.border = ft.border.all(1, DANGER if active else BORDER)
+    e.control.update()
+
+
+def _hover_icon(e: ft.ControlEvent) -> None:
+    e.control.bgcolor = BG_CARD_HOVER if e.data == "true" else None
+    e.control.update()
+
+
+def _hover_row(e: ft.ControlEvent) -> None:
+    e.control.bgcolor = BG_CARD_HOVER if e.data == "true" else None
+    e.control.update()
+
+
+def card(content, padding=SP_MD, hover=True, expand=False, on_click=None):
+    c = ft.Container(content=content, bgcolor=BG_CARD,
+                     border=ft.border.all(1, BORDER),
+                     border_radius=RADIUS_MD, padding=padding,
+                     expand=expand, on_click=on_click, ink=False)
+    if hover:
+        c.on_hover = _hover_card
+    return c
+
+
+def text_field(label, value="", width=None, password=False, multiline=False,
+               on_change=None, on_submit=None, prefix_icon=None,
+               keyboard_type=None, hint=None, autofocus=False,
+               read_only=False, expand=False):
+    return ft.TextField(
+        label=label, value=value, width=width, password=password,
+        can_reveal_password=password, multiline=multiline,
+        min_lines=4 if multiline else 1, max_lines=12 if multiline else 1,
+        on_change=on_change, on_submit=on_submit, prefix_icon=prefix_icon,
+        keyboard_type=keyboard_type, hint_text=hint, autofocus=autofocus,
+        read_only=read_only, expand=expand, bgcolor=BG_INPUT,
+        border_color=BORDER, focused_border_color=ACCENT,
+        border_radius=RADIUS_SM, color=TEXT_PRIMARY, cursor_color=ACCENT,
+        text_size=FS_BODY, content_padding=12,
+        label_style=ft.TextStyle(color=TEXT_SECONDARY, size=FS_SMALL))
+
+
+def dropdown(label, options, value=None, width=None, on_change=None):
+    return ft.Dropdown(
+        label=label, value=value, width=width,
+        options=[ft.dropdown.Option(o) for o in options],
+        on_change=on_change, bgcolor=BG_INPUT, border_color=BORDER,
+        focused_border_color=ACCENT, border_radius=RADIUS_SM,
+        color=TEXT_PRIMARY, text_size=FS_BODY, content_padding=12,
+        label_style=ft.TextStyle(color=TEXT_SECONDARY, size=FS_SMALL))
+
+
+def keyed_dropdown(label, options, value=None, width=None, on_change=None):
+    return ft.Dropdown(
+        label=label, value=value, width=width,
+        options=[ft.dropdown.Option(key=k, text=t) for k, t in options],
+        on_change=on_change, bgcolor=BG_INPUT, border_color=BORDER,
+        focused_border_color=ACCENT, border_radius=RADIUS_SM,
+        color=TEXT_PRIMARY, text_size=FS_BODY, content_padding=12,
+        label_style=ft.TextStyle(color=TEXT_SECONDARY, size=FS_SMALL))
+
+
+def primary_button(text, on_click, icon=None, width=None, height=BTN_H,
+                   expand=False, disabled=False):
+    if icon:
+        content = ft.Row(
+            [ft.Icon(icon, size=16, color=BG_BLACK),
+             ft.Text(text, color=BG_BLACK,
+                     weight=ft.FontWeight.W_700, size=FS_BODY)],
+            alignment=ft.MainAxisAlignment.CENTER, spacing=6, tight=True)
+    else:
+        content = ft.Text(text, color=BG_BLACK,
+                          weight=ft.FontWeight.W_700, size=FS_BODY)
+    c = ft.Container(
+        content=content, bgcolor=ACCENT if not disabled else BG_CARD,
+        border_radius=RADIUS_SM,
+        padding=ft.padding.symmetric(horizontal=BTN_PAD_H,
+                                     vertical=BTN_PAD_V),
+        on_click=on_click if not disabled else None, width=width,
+        height=height, expand=expand, alignment=ft.alignment.center,
+        ink=not disabled)
+    if not disabled:
+        c.on_hover = _hover_primary
+    return c
+
+
+def ghost_button(text, on_click, icon=None, width=None, height=BTN_H,
+                 expand=False, color=None, danger=False):
+    fg = color or TEXT_PRIMARY
+    if icon:
+        content = ft.Row(
+            [ft.Icon(icon, size=16, color=fg),
+             ft.Text(text, color=fg, weight=ft.FontWeight.W_600,
+                     size=FS_BODY)],
+            alignment=ft.MainAxisAlignment.CENTER, spacing=6, tight=True)
+    else:
+        content = ft.Text(text, color=fg, weight=ft.FontWeight.W_600,
+                          size=FS_BODY)
+    c = ft.Container(
+        content=content, bgcolor="transparent",
+        border=ft.border.all(1, BORDER), border_radius=RADIUS_SM,
+        padding=ft.padding.symmetric(horizontal=BTN_PAD_H,
+                                     vertical=BTN_PAD_V),
+        on_click=on_click, width=width, height=height, expand=expand,
+        alignment=ft.alignment.center, ink=True)
+    c.on_hover = _hover_danger if danger else _hover_ghost
+    return c
+
+
+def icon_button(icon, on_click, tooltip="", color=TEXT_PRIMARY, size=32,
+                disabled=False):
+    c = ft.Container(
+        content=ft.Icon(icon, color=(TEXT_MUTED if disabled else color),
+                        size=16),
+        width=size, height=size, border_radius=RADIUS_SM,
+        alignment=ft.alignment.center,
+        on_click=None if disabled else on_click,
+        tooltip=tooltip, ink=not disabled,
+        on_hover=None if disabled else _hover_icon)
+    return c
+
+
+def page_title(title, subtitle=""):
+    items = [ft.Text(title, color=TEXT_PRIMARY, size=FS_TITLE,
+                     weight=ft.FontWeight.W_800)]
+    if subtitle:
+        items.append(ft.Text(subtitle, color=TEXT_MUTED, size=FS_SMALL))
+    return ft.Column(items, spacing=2, tight=True)
+
+
+def section_title(text):
+    return ft.Text(text, color=TEXT_PRIMARY, size=FS_SECTION,
+                   weight=ft.FontWeight.W_700)
+
+
+def divider():
+    return ft.Container(height=1, bgcolor=BORDER)
+
+
+def empty_state(message, icon=ft.icons.INBOX):
+    return ft.Container(
+        content=ft.Column(
+            [ft.Icon(icon, size=44, color=TEXT_MUTED),
+             ft.Text(message, color=TEXT_MUTED, size=FS_BODY)],
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_SM),
+        alignment=ft.alignment.center, padding=SP_XL, expand=True)
+
+
+def snack(page, message, kind="info"):
+    colors = {"info": (BG_CARD, TEXT_PRIMARY),
+              "success": ("#0f2a18", SUCCESS),
+              "error": ("#2a0f0f", DANGER),
+              "warning": ("#2a200f", WARNING)}
+    bg, fg = colors.get(kind, colors["info"])
+    try:
+        page.open(ft.SnackBar(ft.Text(message, color=fg, size=FS_BODY),
+                              bgcolor=bg))
+    except Exception:
+        pass
+
+
+def confirm_dialog(page, title, message, on_confirm,
+                   confirm_text="تأكيد", cancel_text="إلغاء",
+                   danger=False):
+    def close(e=None):
+        page.close(dlg)
+
+    def confirm(e):
+        page.close(dlg)
+        on_confirm()
+
+    dlg = ft.AlertDialog(
+        modal=True, bgcolor=BG_CARD,
+        title=ft.Text(title, color=TEXT_PRIMARY,
+                      weight=ft.FontWeight.W_700, size=FS_SECTION),
+        content=ft.Text(message, color=TEXT_SECONDARY, size=FS_BODY),
+        actions=[ghost_button(cancel_text, close, width=120),
+                 ghost_button(confirm_text, confirm, width=120,
+                              color=DANGER if danger else BG_BLACK,
+                              danger=danger)])
+    page.open(dlg)
+
+
+def show_row_context_menu(page, edit_fn=None, delete_fn=None,
+                          extra_items=None):
+    def close(e=None):
+        page.close(dlg)
+
+    def do_edit(e):
+        page.close(dlg)
+        if edit_fn:
+            edit_fn()
+
+    def do_delete(e):
+        page.close(dlg)
+        if delete_fn:
+            delete_fn()
+
+    actions = []
+    if edit_fn:
+        actions.append(ghost_button("تعديل", do_edit,
+                                    icon=ft.icons.EDIT, width=130))
+    if delete_fn:
+        actions.append(ghost_button("حذف", do_delete,
+                                    icon=ft.icons.DELETE, width=130,
+                                    color=DANGER, danger=True))
+    if extra_items:
+        actions.extend(extra_items)
+    actions.append(ghost_button("إغلاق", close, width=110))
+
+    dlg = ft.AlertDialog(
+        modal=True, bgcolor=BG_CARD,
+        title=ft.Text("خيارات السجل", color=TEXT_PRIMARY,
+                      weight=ft.FontWeight.W_700, size=FS_SECTION),
+        content=ft.Text("اختر إجراءً:", color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+        actions=actions)
+    page.open(dlg)
+
+
+def data_table(page, columns, rows, empty_message="لا توجد سجلات.",
+               context_actions=None):
+    if not rows:
+        return empty_state(empty_message)
+    header = ft.Row(
+        [ft.Container(ft.Text(h, color=TEXT_SECONDARY, size=FS_TINY,
+                              weight=ft.FontWeight.W_700), width=w)
+         for h, w in columns], spacing=SP_MD)
+    body_rows = []
+    for idx, r in enumerate(rows):
+        cells = [ft.Container(c, width=columns[i][1],
+                              alignment=ft.alignment.center_left)
+                 for i, c in enumerate(r)]
+        row = ft.Container(
+            content=ft.Row(cells, spacing=SP_MD,
+                           vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.padding.symmetric(vertical=8, horizontal=SP_MD),
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)))
+        row.on_hover = _hover_row
+        if context_actions and idx < len(context_actions) \
+                and context_actions[idx]:
+            e_fn, d_fn = context_actions[idx]
+            if e_fn or d_fn:
+                row.on_secondary_tap = (
+                    lambda e, ef=e_fn, df=d_fn:
+                    show_row_context_menu(page, ef, df))
+        body_rows.append(row)
+    return ft.Column(
+        [ft.Container(content=header,
+                      padding=ft.padding.symmetric(vertical=8,
+                                                   horizontal=SP_MD),
+                      border=ft.border.only(bottom=ft.BorderSide(1, BORDER))),
+         ft.Column(body_rows, spacing=0, scroll=ft.ScrollMode.AUTO,
+                   expand=True)],
+        spacing=0, expand=True)
+
+
+def chip(text, color=TEXT_SECONDARY, bg=None):
+    return ft.Container(
+        content=ft.Text(text, color=color, size=FS_TINY,
+                        weight=ft.FontWeight.W_600),
+        bgcolor=bg or BG_INPUT,
+        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+        border_radius=999)
+
+
+# ===========================================================================
+# DATABASE LAYER
+# ===========================================================================
+
+@contextmanager
+def get_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _today():
+    return date.today().isoformat()
+
+
+def _money(value):
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _row_to_dict(row):
+    return dict(row) if row is not None else None
+
+
+def _rows_to_dicts(rows):
+    return [dict(r) for r in rows]
+
+
+def _date_filter(column, date_from=None, date_to=None):
+    clauses, params = [], []
+    if date_from:
+        clauses.append(f"date({column}) >= date(?)")
+        params.append(date_from)
+    if date_to:
+        clauses.append(f"date({column}) <= date(?)")
+        params.append(date_to)
+    return clauses, params
+
+
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"),
+                                 salt.encode("utf-8"), 120_000).hex()
+    return f"{salt}${digest}"
+
+
+def verify_password(password, stored_hash):
+    if not stored_hash or "$" not in stored_hash:
+        return False
+    salt, _ = stored_hash.split("$", 1)
+    return secrets.compare_digest(hash_password(password, salt),
+                                  stored_hash)
+
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT '',
+    supplier TEXT NOT NULL DEFAULT '',
+    cost_price REAL NOT NULL DEFAULT 0,
+    wholesale_price REAL NOT NULL DEFAULT 0,
+    stock_qty INTEGER NOT NULL DEFAULT 0,
+    min_limit INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_products_name ON products (name);
+CREATE INDEX IF NOT EXISTS idx_products_supplier ON products (supplier);
+CREATE TABLE IF NOT EXISTS suppliers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_number INTEGER UNIQUE,
+    customer_name TEXT NOT NULL DEFAULT '',
+    customer_phone TEXT NOT NULL DEFAULT '',
+    total_items INTEGER NOT NULL DEFAULT 0,
+    subtotal REAL NOT NULL DEFAULT 0,
+    discount REAL NOT NULL DEFAULT 0,
+    net_total REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    cashier_name TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices (created_at);
+CREATE TABLE IF NOT EXISTS invoice_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id INTEGER NOT NULL,
+    product_code TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    price REAL NOT NULL,
+    total_price REAL NOT NULL,
+    FOREIGN KEY (invoice_id) REFERENCES invoices (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items (invoice_id);
+CREATE INDEX IF NOT EXISTS idx_invoice_items_code ON invoice_items (product_code);
+CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    amount REAL NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL DEFAULT (date('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses (date);
+CREATE TABLE IF NOT EXISTS purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_code TEXT NOT NULL,
+    product_name TEXT NOT NULL,
+    supplier TEXT NOT NULL DEFAULT '',
+    quantity INTEGER NOT NULL DEFAULT 0,
+    purchase_price REAL NOT NULL DEFAULT 0,
+    selling_price REAL NOT NULL DEFAULT 0,
+    total_cost REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_purchases_created_at ON purchases (created_at);
+CREATE INDEX IF NOT EXISTS idx_purchases_code ON purchases (product_code);
+CREATE TABLE IF NOT EXISTS seasons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'off' CHECK (status IN ('on', 'off')),
+    activated_at TEXT,
+    closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+def initialize_database():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    with get_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.executescript(SCHEMA_SQL)
+        # migrations
+        for stmt in (
+            "ALTER TABLE products ADD COLUMN supplier TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE invoices ADD COLUMN invoice_number INTEGER",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+        # seed seasons
+        for name in SEASON_NAMES:
+            conn.execute(
+                "INSERT OR IGNORE INTO seasons (season_name, status) "
+                "VALUES (?, 'off')", (name,))
+        # seed admin
+        count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        if count == 0:
+            conn.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("admin", hash_password("admin123"), ROLE_ADMIN))
+        # seed settings
+        for key, value in DEFAULT_SETTINGS.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                (key, value))
+        old = conn.execute(
+            "SELECT value FROM settings WHERE key = 'currency_symbol'"
+        ).fetchone()
+        if old is not None and old["value"] == "$":
+            conn.execute(
+                "UPDATE settings SET value = ? WHERE key = 'currency_symbol'",
+                ("ج.م",))
+        # backfill invoice_number for legacy rows
+        rows = conn.execute(
+            "SELECT id FROM invoices WHERE invoice_number IS NULL "
+            "ORDER BY id").fetchall()
+        if rows:
+            max_row = conn.execute(
+                "SELECT COALESCE(MAX(invoice_number), ?) AS m FROM invoices",
+                (INVOICE_START_NUMBER,)).fetchone()
+            nxt = max(int(max_row["m"]), INVOICE_START_NUMBER)
+            for r in rows:
+                nxt += 1
+                conn.execute(
+                    "UPDATE invoices SET invoice_number = ? WHERE id = ?",
+                    (nxt, r["id"]))
+
+
+# --- Users ---
+
+def create_user(username, password, role=ROLE_USER):
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("اسم المستخدم مطلوب.")
+    if not password or len(password) < 4:
+        raise ValueError("كلمة المرور يجب أن تكون 4 أحرف على الأقل.")
+    if role not in VALID_ROLES:
+        raise ValueError(f"الدور يجب أن يكون أحد: {VALID_ROLES}.")
+    with get_connection() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                (username, hash_password(password), role))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"اسم المستخدم '{username}' موجود بالفعل.")
+        return int(cur.lastrowid)
+
+
+def authenticate(username, password):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM users WHERE username = ?",
+                           ((username or "").strip(),)).fetchone()
+    if row is None or not verify_password(password, row["password"]):
+        return None
+    return {"id": row["id"], "username": row["username"],
+            "role": row["role"]}
+
+
+def get_all_users():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, username, role, created_at FROM users "
+            "ORDER BY username COLLATE NOCASE").fetchall()
+    return _rows_to_dicts(rows)
+
+
+def update_user_password(user_id, new_password):
+    if not new_password or len(new_password) < 4:
+        raise ValueError("كلمة المرور يجب أن تكون 4 أحرف على الأقل.")
+    with get_connection() as conn:
+        cur = conn.execute("UPDATE users SET password = ? WHERE id = ?",
+                           (hash_password(new_password), user_id))
+        return cur.rowcount > 0
+
+
+def update_user_role(user_id, role):
+    if role not in VALID_ROLES:
+        raise ValueError(f"الدور يجب أن يكون أحد: {VALID_ROLES}.")
+    with get_connection() as conn:
+        user = conn.execute("SELECT role FROM users WHERE id = ?",
+                            (user_id,)).fetchone()
+        if user is None:
+            return False
+        if user["role"] == ROLE_ADMIN and role != ROLE_ADMIN:
+            admins = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = ?",
+                (ROLE_ADMIN,)).fetchone()["c"]
+            if admins <= 1:
+                raise ValueError("لا يمكن تخفيض آخر مسؤول متبقٍ.")
+        cur = conn.execute("UPDATE users SET role = ? WHERE id = ?",
+                           (role, user_id))
+        return cur.rowcount > 0
+
+
+def delete_user(user_id):
+    with get_connection() as conn:
+        user = conn.execute("SELECT role FROM users WHERE id = ?",
+                            (user_id,)).fetchone()
+        if user is None:
+            return False
+        if user["role"] == ROLE_ADMIN:
+            admins = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = ?",
+                (ROLE_ADMIN,)).fetchone()["c"]
+            if admins <= 1:
+                raise ValueError("لا يمكن حذف آخر مسؤول متبقٍ.")
+        cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return cur.rowcount > 0
+
+
+# --- Products ---
+
+def add_product(code, name, supplier=""):
+    code = (code or "").strip()
+    name = (name or "").strip()
+    if not code:
+        raise ValueError("كود المنتج مطلوب.")
+    if not name:
+        raise ValueError("اسم المنتج مطلوب.")
+    with get_connection() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO products (code, name, supplier) "
+                "VALUES (?, ?, ?)",
+                (code, name, (supplier or "").strip()))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"كود المنتج '{code}' موجود بالفعل.")
+        return int(cur.lastrowid)
+
+
+def update_product(product_id, code, name, supplier=""):
+    code = (code or "").strip()
+    name = (name or "").strip()
+    if not code:
+        raise ValueError("كود المنتج مطلوب.")
+    if not name:
+        raise ValueError("اسم المنتج مطلوب.")
+    with get_connection() as conn:
+        try:
+            cur = conn.execute(
+                "UPDATE products SET code = ?, name = ?, supplier = ? "
+                "WHERE id = ?",
+                (code, name, (supplier or "").strip(), product_id))
+        except sqlite3.IntegrityError:
+            raise ValueError(f"كود المنتج '{code}' موجود بالفعل.")
+        return cur.rowcount > 0
+
+
+def delete_product(product_id):
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        return cur.rowcount > 0
+
+
+def get_product_by_id(product_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM products WHERE id = ?",
+                           (product_id,)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_product_by_code(code):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM products WHERE code = ?",
+                           ((code or "").strip(),)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_all_products(search="", category=""):
+    query = "SELECT * FROM products"
+    clauses, params = [], []
+    if search:
+        term = f"%{search.strip()}%"
+        clauses.append("(code LIKE ? OR name LIKE ? OR supplier LIKE ?)")
+        params.extend([term, term, term])
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY name COLLATE NOCASE"
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def search_products(term, limit=50):
+    term = (term or "").strip()
+    if not term:
+        return []
+    pattern = f"%{term}%"
+    with get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM products
+               WHERE code LIKE ? OR name LIKE ? OR supplier LIKE ?
+               ORDER BY (stock_qty > 0) DESC, name COLLATE NOCASE LIMIT ?""",
+            (pattern, pattern, pattern, int(limit))).fetchall()
+    return _rows_to_dicts(rows)
+
+
+# --- Suppliers ---
+
+def add_supplier(name, phone="", address="", notes=""):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("اسم المورد مطلوب.")
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO suppliers (name, phone, address, notes) "
+            "VALUES (?, ?, ?, ?)",
+            (name, (phone or "").strip(), (address or "").strip(),
+             (notes or "").strip()))
+        return int(cur.lastrowid)
+
+
+def update_supplier(supplier_id, name, phone="", address="", notes=""):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("اسم المورد مطلوب.")
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE suppliers SET name = ?, phone = ?, address = ?, "
+            "notes = ? WHERE id = ?",
+            (name, (phone or "").strip(), (address or "").strip(),
+             (notes or "").strip(), supplier_id))
+        return cur.rowcount > 0
+
+
+def delete_supplier(supplier_id):
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM suppliers WHERE id = ?",
+                           (supplier_id,))
+        return cur.rowcount > 0
+
+
+def get_supplier_by_id(supplier_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM suppliers WHERE id = ?",
+                           (supplier_id,)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_all_suppliers(search=""):
+    query = "SELECT * FROM suppliers"
+    params = []
+    if search:
+        term = f"%{search.strip()}%"
+        query += " WHERE name LIKE ? OR phone LIKE ? OR address LIKE ?"
+        params.extend([term, term, term])
+    query += " ORDER BY name COLLATE NOCASE"
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+# --- Invoices ---
+
+def _next_invoice_number(conn) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(invoice_number), ?) AS m FROM invoices",
+        (INVOICE_START_NUMBER,)).fetchone()
+    return max(int(row["m"]), INVOICE_START_NUMBER) + 1
+
+
+def get_next_invoice_number() -> int:
+    with get_connection() as conn:
+        return _next_invoice_number(conn)
+
+
+def create_invoice(customer_name="", customer_phone="", items=None,
+                   discount=0.0, cashier_name="", created_at=None):
+    items = list(items or [])
+    if not items:
+        raise ValueError("لا يمكن إنشاء فاتورة بدون أصناف.")
+    discount = _money(discount)
+    if discount < 0:
+        raise ValueError("الخصم لا يمكن أن يكون سالباً.")
+    created_at = created_at or _now()
+    with get_connection() as conn:
+        lines, demand, cache = [], {}, {}
+        for raw in items:
+            code = str(raw.get("product_code") or raw.get("code")
+                       or "").strip()
+            if not code:
+                raise ValueError("كل سطر يجب أن يحتوي على كود منتج.")
+            try:
+                qty = int(raw.get("quantity", raw.get("qty", 0)))
+            except (TypeError, ValueError):
+                raise ValueError(f"كمية غير صالحة للمنتج '{code}'.")
+            if qty <= 0:
+                raise ValueError(
+                    f"الكمية للمنتج '{code}' يجب أن تكون أكبر من صفر.")
+            product = cache.get(code)
+            if product is None:
+                product = conn.execute(
+                    "SELECT * FROM products WHERE code = ?",
+                    (code,)).fetchone()
+                if product is None:
+                    raise ValueError(
+                        f"المنتج بالكود '{code}' غير موجود.")
+                cache[code] = product
+            raw_price = raw.get("price")
+            price = _money(product["wholesale_price"] if raw_price is None
+                           else raw_price)
+            if price < 0:
+                raise ValueError(f"سعر غير صالح للمنتج '{code}'.")
+            demand[code] = demand.get(code, 0) + qty
+            lines.append({"product_code": code,
+                          "product_name": product["name"],
+                          "quantity": qty, "price": price,
+                          "total_price": _money(price * qty)})
+        for code, qty in demand.items():
+            if int(cache[code]["stock_qty"]) < qty:
+                raise ValueError(
+                    f"المخزون غير كافٍ للمنتج '{cache[code]['name']}' "
+                    f"(المتاح: {cache[code]['stock_qty']}, "
+                    f"المطلوب: {qty}).")
+        subtotal = _money(sum(l["total_price"] for l in lines))
+        total_items = int(sum(l["quantity"] for l in lines))
+        if discount > subtotal:
+            raise ValueError("الخصم لا يمكن أن يتجاوز المجموع الفرعي.")
+        net_total = _money(subtotal - discount)
+        inv_num = _next_invoice_number(conn)
+        cur = conn.execute(
+            """INSERT INTO invoices
+                   (invoice_number, customer_name, customer_phone,
+                    total_items, subtotal, discount, net_total,
+                    created_at, cashier_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (inv_num, (customer_name or "").strip(),
+             (customer_phone or "").strip(),
+             total_items, subtotal, discount, net_total, created_at,
+             (cashier_name or "").strip()))
+        invoice_id = int(cur.lastrowid)
+        for line in lines:
+            conn.execute(
+                """INSERT INTO invoice_items
+                       (invoice_id, product_code, product_name, quantity,
+                        price, total_price) VALUES (?, ?, ?, ?, ?, ?)""",
+                (invoice_id, line["product_code"], line["product_name"],
+                 line["quantity"], line["price"], line["total_price"]))
+            conn.execute(
+                "UPDATE products SET stock_qty = stock_qty - ? "
+                "WHERE code = ?",
+                (line["quantity"], line["product_code"]))
+    return get_invoice(invoice_id)
+
+
+def get_invoice(invoice_id):
+    with get_connection() as conn:
+        header = conn.execute("SELECT * FROM invoices WHERE id = ?",
+                              (invoice_id,)).fetchone()
+        if header is None:
+            return None
+        items = conn.execute(
+            """SELECT id, invoice_id, product_code, product_name, quantity,
+                      price, total_price FROM invoice_items
+               WHERE invoice_id = ? ORDER BY id""",
+            (invoice_id,)).fetchall()
+    invoice = dict(header)
+    invoice["items"] = _rows_to_dicts(items)
+    return invoice
+
+
+def update_invoice(invoice_id, customer_name="", customer_phone="",
+                   discount=0.0):
+    with get_connection() as conn:
+        inv = conn.execute("SELECT * FROM invoices WHERE id = ?",
+                           (invoice_id,)).fetchone()
+        if inv is None:
+            return False
+        discount = _money(discount)
+        subtotal = _money(inv["subtotal"])
+        if discount < 0 or discount > subtotal:
+            raise ValueError("الخصم غير صالح.")
+        net_total = _money(subtotal - discount)
+        conn.execute(
+            "UPDATE invoices SET customer_name = ?, customer_phone = ?, "
+            "discount = ?, net_total = ? WHERE id = ?",
+            ((customer_name or "").strip(),
+             (customer_phone or "").strip(),
+             discount, net_total, invoice_id))
+    return True
+
+
+def delete_invoice(invoice_id):
+    with get_connection() as conn:
+        inv = conn.execute("SELECT id FROM invoices WHERE id = ?",
+                           (invoice_id,)).fetchone()
+        if inv is None:
+            return False
+        items = conn.execute(
+            "SELECT product_code, quantity FROM invoice_items "
+            "WHERE invoice_id = ?", (invoice_id,)).fetchall()
+        for it in items:
+            conn.execute(
+                "UPDATE products SET stock_qty = stock_qty + ? "
+                "WHERE code = ?",
+                (int(it["quantity"]), it["product_code"]))
+        conn.execute("DELETE FROM invoice_items WHERE invoice_id = ?",
+                     (invoice_id,))
+        conn.execute("DELETE FROM invoices WHERE id = ?", (invoice_id,))
+    return True
+
+
+def get_all_invoices(search=""):
+    query = "SELECT * FROM invoices"
+    params = []
+    if search:
+        term = f"%{search.strip()}%"
+        query += (" WHERE customer_name LIKE ? OR customer_phone LIKE ? "
+                  "OR CAST(invoice_number AS TEXT) LIKE ?")
+        params.extend([term, term, term])
+    query += " ORDER BY id DESC"
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_invoices_in_range(date_from=None, date_to=None, limit=500):
+    query = "SELECT * FROM invoices"
+    clauses, params = _date_filter("created_at", date_from, date_to)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_invoice_number_range(date_from=None, date_to=None):
+    clauses, params = _date_filter("created_at", date_from, date_to)
+    query = ("SELECT MIN(invoice_number) AS min_n, "
+             "MAX(invoice_number) AS max_n, "
+             "COUNT(*) AS c FROM invoices")
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    with get_connection() as conn:
+        row = conn.execute(query, params).fetchone()
+    return {"min_n": row["min_n"], "max_n": row["max_n"],
+            "count": int(row["c"] or 0)}
+
+
+# --- Expenses ---
+
+def add_expense(category, amount, notes="", expense_date=None):
+    category = (category or "").strip()
+    if not category:
+        raise ValueError("فئة المصروف مطلوبة.")
+    amount = _money(amount)
+    if amount <= 0:
+        raise ValueError("مبلغ المصروف يجب أن يكون أكبر من صفر.")
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO expenses (category, amount, notes, date) "
+            "VALUES (?, ?, ?, ?)",
+            (category, amount, (notes or "").strip(),
+             expense_date or _today()))
+        return int(cur.lastrowid)
+
+
+def update_expense(expense_id, category, amount, notes="",
+                   expense_date=None):
+    category = (category or "").strip()
+    if not category:
+        raise ValueError("فئة المصروف مطلوبة.")
+    amount = _money(amount)
+    if amount <= 0:
+        raise ValueError("مبلغ المصروف يجب أن يكون أكبر من صفر.")
+    with get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE expenses SET category = ?, amount = ?, notes = ?, "
+            "date = ? WHERE id = ?",
+            (category, amount, (notes or "").strip(),
+             expense_date or _today(), expense_id))
+        return cur.rowcount > 0
+
+
+def delete_expense(expense_id):
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        return cur.rowcount > 0
+
+
+def get_expense_by_id(expense_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM expenses WHERE id = ?",
+                           (expense_id,)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_expenses(category="", date_from=None, date_to=None):
+    query = "SELECT * FROM expenses"
+    clauses, params = [], []
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    dc, dp = _date_filter("date", date_from, date_to)
+    clauses.extend(dc)
+    params.extend(dp)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY date DESC, id DESC"
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_expense_categories():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT category FROM expenses "
+            "WHERE TRIM(category) <> '' ORDER BY category COLLATE NOCASE"
+        ).fetchall()
+    return [r["category"] for r in rows]
+
+
+def get_total_expenses(date_from=None, date_to=None):
+    clauses, params = _date_filter("date", date_from, date_to)
+    query = "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    with get_connection() as conn:
+        return _money(conn.execute(query, params).fetchone()["total"])
+
+
+# --- Purchases ---
+
+def create_purchase(product_code, quantity, purchase_price, selling_price):
+    code = (product_code or "").strip()
+    product = get_product_by_code(code)
+    if product is None:
+        raise ValueError("المنتج غير موجود.")
+    try:
+        quantity = int(quantity or 0)
+    except (TypeError, ValueError):
+        raise ValueError("كمية غير صالحة.")
+    if quantity <= 0:
+        raise ValueError("الكمية يجب أن تكون أكبر من صفر.")
+    purchase_price = _money(purchase_price)
+    selling_price = _money(selling_price)
+    if purchase_price < 0 or selling_price < 0:
+        raise ValueError("الأسعار لا يمكن أن تكون سالبة.")
+    total_cost = _money(purchase_price * quantity)
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO purchases (product_code, product_name, supplier, "
+            "quantity, purchase_price, selling_price, total_cost) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (code, product["name"], product.get("supplier", ""),
+             quantity, purchase_price, selling_price, total_cost))
+        purchase_id = int(cur.lastrowid)
+        conn.execute(
+            "UPDATE products SET stock_qty = stock_qty + ?, "
+            "cost_price = ?, wholesale_price = ? WHERE code = ?",
+            (quantity, purchase_price, selling_price, code))
+    return purchase_id
+
+
+def update_purchase(purchase_id, product_code, quantity,
+                    purchase_price, selling_price):
+    old = get_purchase_by_id(purchase_id)
+    if old is None:
+        return False
+    code = (product_code or "").strip()
+    product = get_product_by_code(code)
+    if product is None:
+        raise ValueError("المنتج غير موجود.")
+    try:
+        quantity = int(quantity or 0)
+    except (TypeError, ValueError):
+        raise ValueError("كمية غير صالحة.")
+    if quantity <= 0:
+        raise ValueError("الكمية يجب أن تكون أكبر من صفر.")
+    purchase_price = _money(purchase_price)
+    selling_price = _money(selling_price)
+    if purchase_price < 0 or selling_price < 0:
+        raise ValueError("الأسعار لا يمكن أن تكون سالبة.")
+    total_cost = _money(purchase_price * quantity)
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE products SET stock_qty = stock_qty - ? WHERE code = ?",
+            (int(old["quantity"]), old["product_code"]))
+        conn.execute(
+            "UPDATE products SET stock_qty = stock_qty + ?, "
+            "cost_price = ?, wholesale_price = ? WHERE code = ?",
+            (quantity, purchase_price, selling_price, code))
+        cur = conn.execute(
+            "UPDATE purchases SET product_code = ?, product_name = ?, "
+            "supplier = ?, quantity = ?, purchase_price = ?, "
+            "selling_price = ?, total_cost = ? WHERE id = ?",
+            (code, product["name"], product.get("supplier", ""),
+             quantity, purchase_price, selling_price, total_cost,
+             purchase_id))
+    return cur.rowcount > 0
+
+
+def delete_purchase(purchase_id):
+    old = get_purchase_by_id(purchase_id)
+    if old is None:
+        return False
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE products SET stock_qty = stock_qty - ? WHERE code = ?",
+            (int(old["quantity"]), old["product_code"]))
+        cur = conn.execute("DELETE FROM purchases WHERE id = ?",
+                           (purchase_id,))
+    return cur.rowcount > 0
+
+
+def get_purchase_by_id(purchase_id):
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM purchases WHERE id = ?",
+                           (purchase_id,)).fetchone()
+    return _row_to_dict(row)
+
+
+def get_all_purchases(search="", date_from=None, date_to=None):
+    query = "SELECT * FROM purchases"
+    clauses, params = [], []
+    if search:
+        term = f"%{search.strip()}%"
+        clauses.append(
+            "(product_name LIKE ? OR product_code LIKE ? OR supplier LIKE ?)")
+        params.extend([term, term, term])
+    dc, dp = _date_filter("created_at", date_from, date_to)
+    clauses.extend(dc)
+    params.extend(dp)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id DESC"
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_purchases_in_range(date_from=None, date_to=None, limit=500):
+    query = "SELECT * FROM purchases"
+    clauses, params = _date_filter("created_at", date_from, date_to)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    with get_connection() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return _rows_to_dicts(rows)
+
+
+# --- Seasons ---
+
+def get_all_seasons():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM seasons ORDER BY id ASC").fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_active_season():
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM seasons WHERE status = 'on' "
+            "ORDER BY id ASC LIMIT 1").fetchone()
+    return _row_to_dict(row)
+
+
+def set_season_status(season_id, turn_on: bool):
+    with get_connection() as conn:
+        season = conn.execute("SELECT * FROM seasons WHERE id = ?",
+                              (season_id,)).fetchone()
+        if season is None:
+            raise ValueError("الموسم غير موجود.")
+        if turn_on:
+            other = conn.execute(
+                "SELECT * FROM seasons WHERE status = 'on' AND id <> ?",
+                (season_id,)).fetchone()
+            if other is not None:
+                backup_database()
+                clear_operational_data()
+                conn.execute(
+                    "UPDATE seasons SET status = 'off', closed_at = ? "
+                    "WHERE id = ?", (_now(), other["id"]))
+            conn.execute(
+                "UPDATE seasons SET status = 'on', activated_at = ?, "
+                "closed_at = NULL WHERE id = ?",
+                (_now(), season_id))
+        else:
+            if season["status"] == "on":
+                backup_database()
+                clear_operational_data()
+                conn.execute(
+                    "UPDATE seasons SET status = 'off', closed_at = ? "
+                    "WHERE id = ?", (_now(), season_id))
+
+
+def backup_database(destination_path=None):
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    if destination_path is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        destination_path = os.path.join(
+            BACKUP_DIR, f"sierra_backup_{ts}.db")
+    destination_path = os.path.abspath(destination_path)
+    os.makedirs(os.path.dirname(destination_path) or ".", exist_ok=True)
+    with get_connection() as source:
+        target = sqlite3.connect(destination_path)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    return destination_path
+
+
+def restore_database_from(backup_path):
+    backup_path = os.path.abspath(backup_path)
+    if not os.path.isfile(backup_path):
+        raise FileNotFoundError(
+            f"ملف النسخة الاحتياطية غير موجود: {backup_path}")
+    with open(backup_path, "rb") as f:
+        header = f.read(16)
+    if header != b"SQLite format 3\x00":
+        raise ValueError(
+            "الملف المحدد ليس قاعدة بيانات SQLite صالحة (.db).")
+    try:
+        with get_connection() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+        pass
+    for suffix in ("-wal", "-shm"):
+        sidecar = DB_PATH + suffix
+        try:
+            if os.path.exists(sidecar):
+                os.remove(sidecar)
+        except Exception:
+            pass
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    shutil.copy2(backup_path, DB_PATH)
+    return DB_PATH
+
+
+def clear_operational_data():
+    with get_connection() as conn:
+        conn.execute("DELETE FROM invoice_items")
+        conn.execute("DELETE FROM invoices")
+        conn.execute("DELETE FROM purchases")
+        conn.execute("DELETE FROM expenses")
+        conn.execute("UPDATE products SET stock_qty = 0")
+
+
+# --- Reports ---
+
+def get_sales_summary(date_from=None, date_to=None):
+    clauses, params = _date_filter("created_at", date_from, date_to)
+    query = """SELECT COUNT(*) AS invoice_count,
+                      COALESCE(SUM(total_items), 0) AS total_items,
+                      COALESCE(SUM(subtotal), 0) AS subtotal,
+                      COALESCE(SUM(discount), 0) AS discount,
+                      COALESCE(SUM(net_total), 0) AS net_total
+               FROM invoices"""
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    with get_connection() as conn:
+        row = conn.execute(query, params).fetchone()
+    return {"invoice_count": int(row["invoice_count"]),
+            "total_items": int(row["total_items"]),
+            "subtotal": _money(row["subtotal"]),
+            "discount": _money(row["discount"]),
+            "net_total": _money(row["net_total"])}
+
+
+def get_cost_of_goods_sold(date_from=None, date_to=None):
+    clauses, params = _date_filter("i.created_at", date_from, date_to)
+    query = """SELECT COALESCE(SUM(ii.quantity * COALESCE(p.cost_price, 0)), 0) AS cogs
+               FROM invoice_items ii
+               JOIN invoices i ON i.id = ii.invoice_id
+               LEFT JOIN products p ON p.code = ii.product_code"""
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    with get_connection() as conn:
+        return _money(conn.execute(query, params).fetchone()["cogs"])
+
+
+def get_profit_report(date_from=None, date_to=None):
+    sales = get_sales_summary(date_from, date_to)
+    cogs = get_cost_of_goods_sold(date_from, date_to)
+    expenses = get_total_expenses(date_from, date_to)
+    revenue = _money(sales["net_total"])
+    gross = _money(revenue - cogs)
+    net = _money(gross - expenses)
+    return {"revenue": revenue, "cogs": cogs, "gross_profit": gross,
+            "expenses": expenses, "net_profit": net,
+            "invoice_count": sales["invoice_count"],
+            "total_items": sales["total_items"]}
+
+
+def get_dashboard_stats():
+    with get_connection() as conn:
+        def scalar(q, p=()):
+            r = conn.execute(q, p).fetchone()
+            return r[0] if r is not None else 0
+        return {
+            "total_products": int(scalar("SELECT COUNT(*) FROM products")),
+            "low_stock_count": int(scalar(
+                "SELECT COUNT(*) FROM products WHERE stock_qty <= min_limit "
+                "AND min_limit > 0")),
+            "total_suppliers": int(scalar("SELECT COUNT(*) FROM suppliers")),
+            "total_users": int(scalar("SELECT COUNT(*) FROM users")),
+            "today_sales": _money(scalar(
+                "SELECT COALESCE(SUM(net_total), 0) FROM invoices "
+                "WHERE date(created_at) = date('now', 'localtime')")),
+            "today_invoices": int(scalar(
+                "SELECT COUNT(*) FROM invoices "
+                "WHERE date(created_at) = date('now', 'localtime')")),
+            "month_sales": _money(scalar(
+                "SELECT COALESCE(SUM(net_total), 0) FROM invoices "
+                "WHERE strftime('%Y-%m', created_at) = "
+                "strftime('%Y-%m', 'now', 'localtime')")),
+            "month_expenses": _money(scalar(
+                "SELECT COALESCE(SUM(amount), 0) FROM expenses "
+                "WHERE strftime('%Y-%m', date) = "
+                "strftime('%Y-%m', 'now', 'localtime')")),
+        }
+
+
+# --- Settings ---
+
+def get_setting(key, default=None):
+    with get_connection() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?",
+                           (key,)).fetchone()
+    return default if row is None else row["value"]
+
+
+def set_settings(values):
+    with get_connection() as conn:
+        for key, value in values.items():
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, "" if value is None else str(value)))
+
+
+def get_all_settings():
+    with get_connection() as conn:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    settings = dict(DEFAULT_SETTINGS)
+    settings.update({r["key"]: r["value"] for r in rows})
+    return settings
+
+
+def get_currency_symbol():
+    return get_setting("currency_symbol",
+                       DEFAULT_SETTINGS["currency_symbol"]) or "ج.م"
+
+
+def get_invoice_header():
+    return get_setting("invoice_header",
+                       DEFAULT_SETTINGS["invoice_header"]) or ""
+
+
+def get_invoice_footer():
+    return get_setting("invoice_footer",
+                       DEFAULT_SETTINGS["invoice_footer"]) or ""
+
+
+def get_printer_name():
+    return get_setting("printer_name", "") or ""
+
+
+def money_str(value, currency=None):
+    if currency is None:
+        currency = get_currency_symbol()
+    try:
+        return f"{float(value):,.2f} {currency}"
+    except (TypeError, ValueError):
+        return f"0.00 {currency}"
+
+
+# --- Receipt formatter ---
+
+def _receipt_width(paper_mm):
+    return 32 if "58" in str(paper_mm) else 42
+
+
+def format_receipt(invoice, header, footer, currency="ج.م",
+                   paper_mm="80mm"):
+    W = _receipt_width(paper_mm)
+
+    def center(s):
+        return s.center(W)[:W]
+
+    def sep(ch="="):
+        return ch * W
+
+    def row(left, right):
+        gap = W - len(left) - len(right)
+        return ((left + " " + right)[:W] if gap < 1
+                else left + " " * gap + right)
+
+    out = [sep("=")]
+    out.append(center("SIERRA STORE"))
+    for h in (header or "").splitlines():
+        if h.strip() and h.strip() != "SIERRA STORE":
+            out.append(center(h))
+    out.append(sep("="))
+    out.append(f"Invoice No: {invoice.get('invoice_number', invoice['id'])}")
+    out.append(f"Date      : {invoice['created_at']}")
+    if invoice.get("cashier_name"):
+        out.append(f"Cashier   : {invoice['cashier_name']}")
+    if invoice.get("customer_name"):
+        out.append(f"Customer  : {invoice['customer_name']}")
+    if invoice.get("customer_phone"):
+        out.append(f"Phone     : {invoice['customer_phone']}")
+    out.append(sep("-"))
+    out.append(row("Item / Qty / Price / Total", ""))
+    out.append(sep("-"))
+    for it in invoice.get("items", []):
+        name = (it["product_name"] or "")[:max(1, W - 20)]
+        line = f"{name} x{it['quantity']} @ {currency}{it['price']:.2f}"
+        out.append(row(line[:W - 12], f"{currency}{it['total_price']:.2f}"))
+    out.append(sep("-"))
+    out.append(row("توتال القطع", str(invoice["total_items"])))
+    out.append(row("توتال الفلوس",
+                   f"{currency}{invoice['net_total']:.2f}"))
+    if invoice["discount"] > 0:
+        out.append(row("Discount",
+                       f"-{currency}{invoice['discount']:.2f}"))
+        out.append(row("Subtotal",
+                       f"{currency}{invoice['subtotal']:.2f}"))
+    out.append(sep("="))
+    for f in (footer or "").splitlines():
+        out.append(center(f))
+    return "\n".join(out)
+
+
+# ===========================================================================
+# SHARED: PRINT HELPER
+# ===========================================================================
+
+def try_send_to_printer(receipt_text: str) -> Optional[str]:
+    """Try to print via the configured thermal printer.
+
+    Returns a status message on success, or None if printing is not available
+    on this platform. The actual printing is optional; the receipt is always
+    shown on screen as a fallback."""
+    printer_name = get_printer_name()
+    if not printer_name:
+        return None
+    try:
+        if os.name == "nt":
+            # On Windows, write raw text to the printer via win32print
+            import win32print  # type: ignore
+            handle = win32print.OpenPrinter(printer_name)
+            try:
+                job = win32print.StartDocPrinter(
+                    handle, 1, ("SIERRA STORE", None, "RAW"))
+                try:
+                    win32print.StartPagePrinter(handle)
+                    win32print.WritePrinter(
+                        handle, receipt_text.encode("utf-8"))
+                    win32print.EndPagePrinter(handle)
+                finally:
+                    win32print.EndDocPrinter(handle)
+            finally:
+                win32print.ClosePrinter(handle)
+            return f"تم الإرسال إلى الطابعة: {printer_name}"
+    except Exception:
+        pass
+    return None
+
+
+def show_receipt_dialog(page, invoice, currency, paper_mm="80mm"):
+    receipt = format_receipt(invoice, get_invoice_header(),
+                             get_invoice_footer(), currency, paper_mm)
+
+    field = ft.TextField(
+        value=receipt, multiline=True, min_lines=20, max_lines=28,
+        read_only=True,
+        text_style=ft.TextStyle(font_family="Courier New",
+                                size=FS_SMALL, color=TEXT_PRIMARY),
+        bgcolor=BG_INPUT, border_color=BORDER,
+        border_radius=RADIUS_SM, width=480)
+
+    def copy(e):
+        try:
+            page.set_clipboard(receipt)
+            snack(page, "تم نسخ الإيصال إلى الحافظة.", kind="success")
+        except Exception:
+            snack(page, "النسخ غير مدعوم.", kind="error")
+
+    def send_print(e):
+        msg = try_send_to_printer(receipt)
+        if msg:
+            snack(page, msg, kind="success")
+        else:
+            snack(page,
+                  "لم يتم العثور على طابعة حرارية مُهيأة "
+                  "(يمكن ضبط اسم الطابعة من الإعدادات).",
+                  kind="warning")
+
+    def close(e):
+        page.close(dlg)
+
+    dlg = ft.AlertDialog(
+        modal=True, bgcolor=BG_CARD,
+        title=ft.Text(
+            f"إيصال — فاتورة رقم "
+            f"{invoice.get('invoice_number', invoice['id'])}",
+            color=TEXT_PRIMARY, weight=ft.FontWeight.W_700,
+            size=FS_SECTION),
+        content=field,
+        actions=[ghost_button("نسخ", copy, icon=ft.icons.COPY, width=110),
+                 ghost_button("طباعة", send_print,
+                              icon=ft.icons.PRINT, width=110),
+                 primary_button("تم", close, width=110)])
+    page.open(dlg)
+
+
+# ===========================================================================
+# VIEWS
+# ===========================================================================
+
+class LoginView:
+    def __init__(self, app, page):
+        self.app = app
+        self.page = page
+        self.username = text_field(
+            "اسم المستخدم", autofocus=True,
+            prefix_icon=ft.icons.PERSON_OUTLINE, width=360)
+        self.password = text_field(
+            "كلمة المرور", password=True,
+            prefix_icon=ft.icons.LOCK_OUTLINE, width=360,
+            on_submit=self._login)
+        self.error = ft.Text("", color=DANGER, size=FS_SMALL,
+                             visible=False)
+        self.btn = primary_button("تسجيل الدخول", self._login,
+                                  icon=ft.icons.LOGIN,
+                                  width=360, height=48)
+
+    def _login(self, e=None):
+        self.error.visible = False
+        try:
+            self.error.update()
+        except Exception:
+            pass
+        user = authenticate(self.username.value or "",
+                            self.password.value or "")
+        if user is None:
+            self.error.value = "اسم المستخدم أو كلمة المرور غير صحيحة."
+            self.error.visible = True
+            self.error.update()
+            return
+        self.app.on_login_success(user)
+
+    def build(self):
+        brand = ft.Column(
+            [ft.Container(
+                content=ft.Icon(ft.icons.STOREFRONT, size=34,
+                                color=BG_BLACK),
+                width=72, height=72, bgcolor=ACCENT,
+                border_radius=RADIUS_LG, alignment=ft.alignment.center),
+             ft.Text("SIERRA STORE", color=TEXT_PRIMARY, size=34,
+                     weight=ft.FontWeight.W_900),
+             ft.Text("نظام إدارة متجر الملابس بالجملة",
+                     color=TEXT_MUTED, size=FS_BODY)],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_SM)
+        box = card(
+            ft.Column(
+                [ft.Text("مرحباً بعودتك", color=TEXT_PRIMARY, size=20,
+                         weight=ft.FontWeight.W_700),
+                 ft.Text("سجّل الدخول للمتابعة", color=TEXT_MUTED,
+                         size=FS_SMALL),
+                 ft.Container(height=SP_MD), self.username, self.password,
+                 self.error, ft.Container(height=SP_SM), self.btn,
+                 ft.Container(height=SP_SM),
+                 ft.Text("الحساب الافتراضي: admin / admin123",
+                         color=TEXT_MUTED, size=FS_TINY)],
+                spacing=SP_SM),
+            padding=SP_XL, hover=True)
+        return ft.Container(
+            content=ft.Column(
+                [brand, ft.Container(height=SP_LG), box],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER, spacing=0),
+            alignment=ft.alignment.center, expand=True,
+            bgcolor=BG_BLACK, padding=SP_LG)
+
+
+class DashboardView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+
+    def build(self):
+        stats = get_dashboard_stats()
+        active = get_active_season()
+        season_label = (active["season_name"] if active
+                        else "لا يوجد موسم نشط")
+        season_color = SUCCESS if active else TEXT_MUTED
+
+        tiles = [
+            ("مبيعات اليوم",
+             money_str(stats["today_sales"], self.currency), SUCCESS),
+            ("فواتير اليوم", str(stats["today_invoices"]), TEXT_PRIMARY),
+            ("مبيعات الشهر",
+             money_str(stats["month_sales"], self.currency), TEXT_PRIMARY),
+            ("مصروفات الشهر",
+             money_str(stats["month_expenses"], self.currency), WARNING),
+            ("المنتجات", str(stats["total_products"]), TEXT_PRIMARY),
+            ("مخزون منخفض", str(stats["low_stock_count"]),
+             DANGER if stats["low_stock_count"] else SUCCESS),
+            ("الموردون", str(stats["total_suppliers"]), TEXT_PRIMARY),
+            ("المستخدمون", str(stats["total_users"]), TEXT_PRIMARY),
+        ]
+        grid = ft.Row(wrap=True, spacing=SP_MD, run_spacing=SP_MD,
+                      expand=True)
+        for label, value, color in tiles:
+            grid.controls.append(ft.Container(
+                content=ft.Column(
+                    [ft.Text(label.upper(), color=TEXT_MUTED,
+                             size=FS_TINY,
+                             weight=ft.FontWeight.W_700),
+                     ft.Text(value, color=color, size=18,
+                             weight=ft.FontWeight.W_800)],
+                    spacing=4, tight=True),
+                padding=SP_MD, bgcolor=BG_CARD,
+                border=ft.border.all(1, BORDER),
+                border_radius=RADIUS_MD,
+                width=265, height=90, on_hover=_hover_card))
+
+        season_card = card(
+            ft.Row(
+                [ft.Icon(ft.icons.CALENDAR_MONTH, size=22,
+                         color=season_color),
+                 ft.Container(width=SP_SM),
+                 ft.Column(
+                     [ft.Text("الموسم الحالي", color=TEXT_MUTED,
+                              size=FS_TINY),
+                      ft.Text(season_label, color=season_color,
+                              size=FS_SECTION,
+                              weight=ft.FontWeight.W_700)],
+                     spacing=0, tight=True, expand=True)],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=SP_MD, hover=False)
+
+        return ft.Column(
+            [ft.Row([page_title(
+                "لوحة التحكم",
+                f"أهلاً بعودتك، {self.user['username']}"),
+                ft.Container(expand=True)]),
+             ft.Container(height=SP_SM),
+             season_card,
+             ft.Container(height=SP_SM),
+             grid],
+            spacing=0, expand=True)
+
+
+# ---------------------------------------------------------------------------
+# POS VIEW
+# ---------------------------------------------------------------------------
+
+class POSView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        s = get_all_settings()
+        self.currency = s.get("currency_symbol", "ج.م")
+        self.paper_mm = s.get("printer_paper_width", "80mm")
+        self.cart = []
+        self.discount_enabled = False
+        self.discount_type = "ثابت"
+        self.discount_value = 0.0
+
+        self.invoice_no_text = ft.Text("", color=TEXT_PRIMARY,
+                                       size=FS_SECTION,
+                                       weight=ft.FontWeight.W_800)
+        self.datetime_text = ft.Text("", color=TEXT_MUTED, size=FS_SMALL)
+        self.customer_name = text_field(
+            "اسم العميل", prefix_icon=ft.icons.PERSON_OUTLINE, width=280)
+        self.customer_phone = text_field(
+            "هاتف العميل", prefix_icon=ft.icons.PHONE, width=220)
+        self.search_input = text_field(
+            "ابحث بالكود أو الاسم…",
+            prefix_icon=ft.icons.SEARCH, on_change=self._on_search,
+            on_submit=self._on_search_submit, autofocus=True)
+        self.search_results = ft.Column(spacing=0, height=160,
+                                        scroll=ft.ScrollMode.AUTO)
+        self.search_wrapper = ft.Container(
+            content=self.search_results, bgcolor=BG_INPUT,
+            border=ft.border.all(1, BORDER), border_radius=RADIUS_SM,
+            padding=SP_XS, visible=False)
+        self.cart_area = ft.Column(spacing=0, scroll=ft.ScrollMode.AUTO,
+                                   expand=True)
+        self.items_count_text = ft.Text("0", color=TEXT_PRIMARY, size=18,
+                                        weight=ft.FontWeight.W_800)
+        self.subtotal_text = ft.Text(
+            money_str(0, self.currency), color=TEXT_PRIMARY,
+            size=FS_SECTION, weight=ft.FontWeight.W_700)
+        self.discount_text = ft.Text(
+            f"- {money_str(0, self.currency)}", color=WARNING,
+            size=FS_BODY)
+        self.net_total_text = ft.Text(
+            money_str(0, self.currency), color=TEXT_PRIMARY, size=26,
+            weight=ft.FontWeight.W_900)
+        self.discount_check = ft.Checkbox(
+            label="تطبيق الخصم", value=False,
+            on_change=self._on_discount_toggle, fill_color=ACCENT,
+            check_color=BG_BLACK,
+            label_style=ft.TextStyle(color=TEXT_SECONDARY, size=FS_BODY))
+        self.discount_type_dd = dropdown(
+            "النوع", ["ثابت", "نسبة مئوية"], value="ثابت", width=150,
+            on_change=self._on_discount_type_change)
+        self.discount_input = text_field(
+            "القيمة", value="0", width=130,
+            on_change=self._on_discount_value_change,
+            keyboard_type=ft.KeyboardType.NUMBER)
+        self.discount_container = ft.Row(
+            [self.discount_type_dd, self.discount_input],
+            spacing=SP_SM, visible=False)
+        self.save_btn = primary_button(
+            "حفظ وطباعة", self._on_save_request, icon=ft.icons.PRINT,
+            width=280, height=48)
+        self._update_header()
+        try:
+            self.page.run_task(self._clock_loop)
+        except Exception:
+            pass
+
+    def build(self):
+        left = ft.Column(
+            [self._build_invoice_bar(), ft.Container(height=SP_SM),
+             self._build_customer_row(), ft.Container(height=SP_SM),
+             self._build_search_block(), ft.Container(height=SP_SM),
+             self._build_cart_block()],
+            spacing=0, expand=True)
+        right = ft.Container(
+            content=ft.Column([self._build_totals_card()], spacing=SP_SM),
+            width=360)
+        return ft.Row(
+            [ft.Container(content=left, expand=True),
+             ft.Container(width=SP_MD), right],
+            vertical_alignment=ft.CrossAxisAlignment.START, expand=True)
+
+    def _build_invoice_bar(self):
+        return card(
+            ft.Row(
+                [ft.Column([ft.Text("فاتورة", color=TEXT_MUTED,
+                                    size=FS_TINY),
+                            self.invoice_no_text], spacing=0, tight=True),
+                 ft.Container(width=SP_LG),
+                 ft.Column([ft.Text("الكاشير", color=TEXT_MUTED,
+                                    size=FS_TINY),
+                            ft.Text(self.user["username"],
+                                    color=TEXT_PRIMARY,
+                                    size=FS_SECTION,
+                                    weight=ft.FontWeight.W_700)],
+                           spacing=0, tight=True),
+                 ft.Container(expand=True),
+                 ft.Column([ft.Text("التاريخ والوقت", color=TEXT_MUTED,
+                                    size=FS_TINY),
+                            self.datetime_text], spacing=0, tight=True,
+                           horizontal_alignment=ft.CrossAxisAlignment.END)],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=SP_SM, hover=False)
+
+    def _build_customer_row(self):
+        return card(ft.Row([self.customer_name, self.customer_phone],
+                           spacing=SP_MD), padding=SP_SM, hover=False)
+
+    def _build_search_block(self):
+        return card(
+            ft.Column([self.search_input, self.search_wrapper],
+                      spacing=SP_SM),
+            padding=SP_SM, hover=False)
+
+    def _build_cart_block(self):
+        header = ft.Container(
+            content=ft.Row(
+                [ft.Container(ft.Text("الصنف", color=TEXT_MUTED,
+                                      size=FS_TINY,
+                                      weight=ft.FontWeight.W_700),
+                              expand=4),
+                 ft.Container(ft.Text("الكمية", color=TEXT_MUTED,
+                                      size=FS_TINY,
+                                      weight=ft.FontWeight.W_700),
+                              width=140),
+                 ft.Container(ft.Text("السعر", color=TEXT_MUTED,
+                                      size=FS_TINY,
+                                      weight=ft.FontWeight.W_700),
+                              width=110),
+                 ft.Container(ft.Text("الإجمالي", color=TEXT_MUTED,
+                                      size=FS_TINY,
+                                      weight=ft.FontWeight.W_700),
+                              width=110),
+                 ft.Container(width=36)],
+                spacing=SP_SM),
+            padding=ft.padding.symmetric(horizontal=SP_MD, vertical=6),
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)))
+        self.cart_area.controls = [self._empty_cart()]
+        return card(ft.Column([header, self.cart_area],
+                              spacing=0, expand=True),
+                    padding=0, hover=False, expand=True)
+
+    def _empty_cart(self):
+        return ft.Container(
+            content=ft.Column(
+                [ft.Icon(ft.icons.SHOPPING_CART_OUTLINED, size=36,
+                         color=TEXT_MUTED),
+                 ft.Text("السلة فارغة. ابحث عن المنتجات أعلاه.",
+                         color=TEXT_MUTED, size=FS_BODY)],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER, spacing=SP_SM),
+            alignment=ft.alignment.center, expand=True)
+
+    def _build_totals_card(self):
+        return card(
+            ft.Column(
+                [ft.Row([ft.Text("عدد القطع", color=TEXT_SECONDARY,
+                                 size=FS_BODY),
+                         ft.Container(expand=True),
+                         self.items_count_text]),
+                 divider(),
+                 ft.Row([ft.Text("المجموع الفرعي",
+                                 color=TEXT_SECONDARY, size=FS_BODY),
+                         ft.Container(expand=True), self.subtotal_text]),
+                 ft.Row([ft.Text("الخصم", color=TEXT_SECONDARY,
+                                 size=FS_BODY),
+                         ft.Container(expand=True), self.discount_text]),
+                 ft.Container(height=SP_SM), self.discount_check,
+                 self.discount_container, divider(),
+                 ft.Text("الإجمالي النهائي", color=TEXT_MUTED,
+                         size=FS_TINY,
+                         weight=ft.FontWeight.W_700),
+                 self.net_total_text, ft.Container(height=SP_SM),
+                 self.save_btn, ft.Container(height=SP_SM),
+                 ghost_button("تفريغ السلة", self._on_clear_cart,
+                              icon=ft.icons.DELETE_OUTLINE, width=280,
+                              danger=True)],
+                spacing=SP_SM),
+            padding=SP_MD, hover=False)
+
+    async def _clock_loop(self):
+        import asyncio
+        while True:
+            await asyncio.sleep(1)
+            try:
+                self._update_header()
+            except Exception:
+                return
+
+    def _update_header(self):
+        try:
+            self.invoice_no_text.value = f"#{get_next_invoice_number()}"
+            self.datetime_text.value = datetime.now().strftime(
+                "%d/%m/%Y  %H:%M:%S")
+            self.invoice_no_text.update()
+            self.datetime_text.update()
+        except Exception:
+            pass
+
+    def _on_search(self, e):
+        term = (self.search_input.value or "").strip()
+        self.search_results.controls.clear()
+        if not term:
+            self.search_wrapper.visible = False
+            try:
+                self.search_wrapper.update()
+            except Exception:
+                pass
+            return
+        results = search_products(term, limit=30)
+        if not results:
+            self.search_results.controls.append(
+                ft.Container(content=ft.Text("لا توجد منتجات مطابقة.",
+                                             color=TEXT_MUTED,
+                                             size=FS_BODY),
+                             padding=12))
+        else:
+            for p in results:
+                self.search_results.controls.append(self._result_row(p))
+        self.search_wrapper.visible = True
+        try:
+            self.search_wrapper.update()
+            self.search_results.update()
+        except Exception:
+            pass
+
+    def _on_search_submit(self, e):
+        term = (self.search_input.value or "").strip()
+        if not term:
+            return
+        p = get_product_by_code(term)
+        if p is None:
+            r = search_products(term, limit=1)
+            p = r[0] if r else None
+        if p is not None:
+            self._add_to_cart(p["id"])
+            self._clear_search()
+
+    def _clear_search(self):
+        self.search_input.value = ""
+        self.search_wrapper.visible = False
+        self.search_input.focus()
+        try:
+            self.search_input.update()
+            self.search_wrapper.update()
+        except Exception:
+            pass
+
+    def _result_row(self, p):
+        stock_color = SUCCESS if p["stock_qty"] > 0 else DANGER
+
+        def _click(e):
+            self._add_to_cart(p["id"])
+            self._clear_search()
+
+        return ft.Container(
+            content=ft.Row(
+                [ft.Column([ft.Text(p["name"], color=TEXT_PRIMARY,
+                                    size=FS_BODY,
+                                    weight=ft.FontWeight.W_600),
+                            ft.Text(f"{p['code']}", color=TEXT_MUTED,
+                                    size=FS_TINY)],
+                           spacing=0, tight=True, expand=True),
+                 ft.Text(money_str(p["wholesale_price"], self.currency),
+                         color=TEXT_PRIMARY, size=FS_BODY,
+                         weight=ft.FontWeight.W_700),
+                 ft.Container(width=SP_SM),
+                 chip(f"متوفر {p['stock_qty']}", color=stock_color,
+                      bg=BG_CARD)],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+            border_radius=RADIUS_SM, on_click=_click, ink=True,
+            on_hover=_hover_ghost)
+
+    def _add_to_cart(self, product_id):
+        product = get_product_by_id(product_id)
+        if product is None:
+            return
+        if product["stock_qty"] <= 0:
+            snack(self.page,
+                  f"'{product['name']}' غير متوفر في المخزون.",
+                  kind="error")
+            return
+        for line in self.cart:
+            if line["product_code"] == product["code"]:
+                if line["quantity"] + 1 > product["stock_qty"]:
+                    snack(self.page,
+                          f"المتوفر فقط {product['stock_qty']} من "
+                          f"'{product['name']}'.", kind="warning")
+                    return
+                line["quantity"] += 1
+                self._refresh_cart()
+                return
+        self.cart.append({"product_code": product["code"],
+                          "product_name": product["name"], "quantity": 1,
+                          "price": float(product["wholesale_price"]),
+                          "stock": int(product["stock_qty"])})
+        self._refresh_cart()
+
+    def _inc(self, idx):
+        line = self.cart[idx]
+        if line["quantity"] + 1 > line["stock"]:
+            snack(self.page, f"المتوفر فقط {line['stock']}.",
+                  kind="warning")
+            return
+        line["quantity"] += 1
+        self._refresh_cart()
+
+    def _dec(self, idx):
+        self.cart[idx]["quantity"] -= 1
+        if self.cart[idx]["quantity"] <= 0:
+            self.cart.pop(idx)
+        self._refresh_cart()
+
+    def _remove(self, idx):
+        self.cart.pop(idx)
+        self._refresh_cart()
+
+    def _refresh_cart(self):
+        self.cart_area.controls.clear()
+        if not self.cart:
+            self.cart_area.controls.append(self._empty_cart())
+        else:
+            for idx, line in enumerate(self.cart):
+                self.cart_area.controls.append(self._cart_row(idx, line))
+        self._recalc_totals()
+        try:
+            self.cart_area.update()
+        except Exception:
+            pass
+
+    def _cart_row(self, idx, line):
+        subtotal = line["price"] * line["quantity"]
+        qty_controls = ft.Row(
+            [icon_button(ft.icons.REMOVE, lambda e, i=idx: self._dec(i),
+                         tooltip="تقليل", size=28),
+             ft.Container(content=ft.Text(str(line["quantity"]),
+                                          color=TEXT_PRIMARY,
+                                          size=FS_BODY,
+                                          weight=ft.FontWeight.W_700),
+                          width=32, alignment=ft.alignment.center),
+             icon_button(ft.icons.ADD, lambda e, i=idx: self._inc(i),
+                         tooltip="زيادة", size=28)],
+            spacing=2, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        return ft.Container(
+            content=ft.Row(
+                [ft.Container(content=ft.Column(
+                    [ft.Text(line["product_name"], color=TEXT_PRIMARY,
+                             size=FS_BODY,
+                             weight=ft.FontWeight.W_600),
+                     ft.Text(line["product_code"], color=TEXT_MUTED,
+                             size=FS_TINY)],
+                    spacing=0, tight=True), expand=4),
+                 ft.Container(qty_controls, width=140),
+                 ft.Container(content=ft.Text(
+                     money_str(line["price"], self.currency),
+                     color=TEXT_SECONDARY, size=FS_SMALL), width=110),
+                 ft.Container(content=ft.Text(
+                     money_str(subtotal, self.currency),
+                     color=TEXT_PRIMARY, size=FS_BODY,
+                     weight=ft.FontWeight.W_700), width=110),
+                 icon_button(ft.icons.CLOSE,
+                             lambda e, i=idx: self._remove(i),
+                             tooltip="إزالة", color=DANGER, size=30)],
+                spacing=SP_SM,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.padding.symmetric(horizontal=SP_MD, vertical=6),
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)))
+
+    def _on_discount_toggle(self, e):
+        self.discount_enabled = bool(self.discount_check.value)
+        self.discount_container.visible = self.discount_enabled
+        if not self.discount_enabled:
+            self.discount_value = 0.0
+            self.discount_input.value = "0"
+        try:
+            self.discount_container.update()
+        except Exception:
+            pass
+        self._recalc_totals()
+
+    def _on_discount_type_change(self, e):
+        self.discount_type = self.discount_type_dd.value or "ثابت"
+        self._recalc_totals()
+
+    def _on_discount_value_change(self, e):
+        try:
+            self.discount_value = float(self.discount_input.value or 0)
+        except ValueError:
+            self.discount_value = 0.0
+        self._recalc_totals()
+
+    def _recalc_totals(self):
+        total_items = sum(l["quantity"] for l in self.cart)
+        subtotal = sum(l["price"] * l["quantity"] for l in self.cart)
+        discount = 0.0
+        if self.discount_enabled:
+            if self.discount_type == "نسبة مئوية":
+                discount = subtotal * (self.discount_value / 100.0)
+            else:
+                discount = self.discount_value
+            discount = max(0.0, min(discount, subtotal))
+        net = subtotal - discount
+        try:
+            self.items_count_text.value = str(total_items)
+            self.subtotal_text.value = money_str(subtotal, self.currency)
+            self.discount_text.value = (
+                f"- {money_str(discount, self.currency)}")
+            self.net_total_text.value = money_str(net, self.currency)
+            self.items_count_text.update()
+            self.subtotal_text.update()
+            self.discount_text.update()
+            self.net_total_text.update()
+        except Exception:
+            pass
+
+    def _on_save_request(self, e):
+        if not self.cart:
+            snack(self.page, "السلة فارغة.", kind="warning")
+            return
+        subtotal = sum(l["price"] * l["quantity"] for l in self.cart)
+        net = subtotal
+        if self.discount_enabled:
+            d = (subtotal * (self.discount_value / 100.0)
+                 if self.discount_type == "نسبة مئوية"
+                 else self.discount_value)
+            d = max(0.0, min(d, subtotal))
+            net = subtotal - d
+        msg = (f"هل تريد حفظ الفاتورة؟\n"
+               f"عدد القطع: {sum(l['quantity'] for l in self.cart)}\n"
+               f"الإجمالي: {money_str(net, self.currency)}")
+        confirm_dialog(
+            self.page, "تأكيد الحفظ", msg,
+            lambda: self._perform_save(), confirm_text="تأكيد",
+            cancel_text="إلغاء", danger=False)
+
+    def _perform_save(self):
+        subtotal = sum(l["price"] * l["quantity"] for l in self.cart)
+        discount = 0.0
+        if self.discount_enabled:
+            if self.discount_type == "نسبة مئوية":
+                discount = subtotal * (self.discount_value / 100.0)
+            else:
+                discount = self.discount_value
+            discount = max(0.0, min(discount, subtotal))
+        try:
+            invoice = create_invoice(
+                customer_name=self.customer_name.value or "",
+                customer_phone=self.customer_phone.value or "",
+                items=[{"product_code": l["product_code"],
+                        "quantity": l["quantity"],
+                        "price": l["price"]} for l in self.cart],
+                discount=discount, cashier_name=self.user["username"])
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            return
+        self.cart.clear()
+        self.customer_name.value = ""
+        self.customer_phone.value = ""
+        self.discount_check.value = False
+        self.discount_enabled = False
+        self.discount_container.visible = False
+        self.discount_input.value = "0"
+        self.discount_value = 0.0
+        self._refresh_cart()
+        self._update_header()
+        try:
+            self.customer_name.update()
+            self.customer_phone.update()
+            self.discount_check.update()
+            self.discount_container.update()
+        except Exception:
+            pass
+        snack(self.page,
+              f"تم حفظ الفاتورة رقم {invoice['invoice_number']}.",
+              kind="success")
+        show_receipt_dialog(self.page, invoice, self.currency,
+                            self.paper_mm)
+
+    def _on_clear_cart(self, e):
+        if not self.cart:
+            return
+        self.cart.clear()
+        self._refresh_cart()
+
+
+# ---------------------------------------------------------------------------
+# SALES VIEW
+# ---------------------------------------------------------------------------
+
+class SalesView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+        self.search = text_field("بحث…", prefix_icon=ft.icons.SEARCH,
+                                 on_change=self._on_search, width=280)
+        self.table_container = ft.Container(expand=True)
+
+    def _can_modify(self, inv: dict) -> bool:
+        if self.user["role"] == ROLE_ADMIN:
+            return True
+        return (inv.get("cashier_name") or "") == self.user["username"]
+
+    def build(self):
+        header = ft.Row(
+            [page_title("المبيعات", "الفواتير المسجلة"),
+             ft.Container(expand=True), self.search],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_MD)
+        self._refresh()
+        return ft.Column(
+            [header, ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container], expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _on_search(self, e):
+        self._refresh()
+
+    def _refresh(self):
+        invoices = get_all_invoices(search=self.search.value or "")
+        rows, ctx = [], []
+        for inv in invoices:
+            can_edit = self._can_modify(inv)
+            actions = ft.Row(
+                [icon_button(ft.icons.PRINT,
+                             lambda e, inv=inv: self._reprint(inv),
+                             tooltip="طباعة", color=SUCCESS),
+                 icon_button(ft.icons.EDIT,
+                             lambda e, inv=inv: self._open_edit_dialog(inv),
+                             tooltip="تعديل",
+                             color=TEXT_PRIMARY, disabled=not can_edit),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, inv=inv: self._confirm_delete(inv),
+                             tooltip="حذف",
+                             color=DANGER, disabled=not can_edit)],
+                spacing=4)
+            rows.append([
+                ft.Text(str(inv.get("invoice_number") or inv["id"]),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                ft.Text(inv["customer_name"] or "—", color=TEXT_PRIMARY,
+                        size=FS_SMALL),
+                ft.Text(money_str(inv["net_total"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                ft.Text(inv["created_at"][:16], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(inv.get("cashier_name") or "—",
+                        color=TEXT_SECONDARY, size=FS_SMALL),
+                actions])
+            ctx.append((
+                (lambda inv=inv: self._open_edit_dialog(inv))
+                if can_edit else None,
+                (lambda inv=inv: self._confirm_delete(inv))
+                if can_edit else None))
+        self.table_container.content = data_table(
+            self.page,
+            [("رقم الفاتورة", 110), ("العميل", 200),
+             ("الإجمالي", 130), ("التاريخ", 150),
+             ("أنشئت بواسطة", 160), ("", 140)],
+            rows, "لا توجد فواتير مسجلة بعد.", ctx)
+        try:
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _reprint(self, inv):
+        full = get_invoice(inv["id"])
+        if full is None:
+            snack(self.page, "الفاتورة غير موجودة.", kind="error")
+            return
+        s = get_all_settings()
+        show_receipt_dialog(self.page, full, self.currency,
+                            s.get("printer_paper_width", "80mm"))
+
+    def _open_edit_dialog(self, inv):
+        if not self._can_modify(inv):
+            snack(self.page,
+                  "لا تملك صلاحية تعديل هذه الفاتورة.",
+                  kind="error")
+            return
+        name = text_field("اسم العميل",
+                          value=inv.get("customer_name") or "",
+                          width=300)
+        phone = text_field("هاتف العميل",
+                           value=inv.get("customer_phone") or "",
+                           width=300)
+        discount = text_field(
+            "الخصم", value=f"{inv.get('discount', 0):.2f}", width=200,
+            keyboard_type=ft.KeyboardType.NUMBER)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            try:
+                update_invoice(inv["id"], customer_name=name.value,
+                               customer_phone=phone.value,
+                               discount=discount.value)
+            except Exception as ex:
+                error.value = str(ex)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            self._refresh()
+            snack(self.page, "تم تحديث الفاتورة.", kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        content = ft.Column(
+            [name, phone, discount, error],
+            spacing=SP_SM, width=340)
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text(
+                f"تعديل الفاتورة #{inv.get('invoice_number', inv['id'])}",
+                color=TEXT_PRIMARY, weight=ft.FontWeight.W_700,
+                size=FS_SECTION),
+            content=content,
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("حفظ", save, icon=ft.icons.CHECK,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _confirm_delete(self, inv):
+        if not self._can_modify(inv):
+            snack(self.page,
+                  "لا تملك صلاحية حذف هذه الفاتورة.",
+                  kind="error")
+            return
+
+        def do_delete():
+            try:
+                delete_invoice(inv["id"])
+                self._refresh()
+                snack(self.page, "تم حذف الفاتورة وإرجاع المخزون.",
+                      kind="success")
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+
+        confirm_dialog(
+            self.page, "حذف الفاتورة",
+            f"حذف الفاتورة #{inv.get('invoice_number', inv['id'])}؟ "
+            "سيتم إرجاع الكميات إلى المخزون.",
+            do_delete, confirm_text="حذف", danger=True)
+
+
+# ---------------------------------------------------------------------------
+# INVENTORY VIEW
+# ---------------------------------------------------------------------------
+
+class InventoryView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+        self.search = text_field("بحث…", prefix_icon=ft.icons.SEARCH,
+                                 on_change=self._on_search, width=280)
+        self.table_container = ft.Container(expand=True)
+
+    def build(self):
+        header = ft.Row(
+            [page_title("المخزون", "كتالوج المنتجات"),
+             ft.Container(expand=True), self.search,
+             primary_button("إضافة منتج", self._open_add_dialog,
+                            icon=ft.icons.ADD, width=160)],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_MD)
+        self._refresh()
+        return ft.Column(
+            [header, ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container], expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _on_search(self, e):
+        self._refresh()
+
+    def _refresh(self):
+        products = get_all_products(search=self.search.value or "")
+        rows, ctx = [], []
+        for p in products:
+            low = p["min_limit"] > 0 and p["stock_qty"] <= p["min_limit"]
+            actions = ft.Row(
+                [icon_button(ft.icons.EDIT,
+                             lambda e, pid=p["id"]:
+                                 self._open_edit_dialog(pid),
+                             tooltip="تعديل"),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, pid=p["id"], pn=p["name"]:
+                                 self._confirm_delete(pid, pn),
+                             tooltip="حذف", color=DANGER)],
+                spacing=4)
+            rows.append([
+                ft.Text(p["code"], color=TEXT_SECONDARY, size=FS_SMALL),
+                ft.Text(p["name"], color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_600),
+                ft.Text(p.get("supplier") or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+                ft.Text(str(p["stock_qty"]),
+                        color=DANGER if low else TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_700),
+                ft.Text(money_str(p["wholesale_price"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL),
+                actions])
+            ctx.append((
+                (lambda pid=p["id"]: self._open_edit_dialog(pid)),
+                (lambda pid=p["id"], pn=p["name"]:
+                 self._confirm_delete(pid, pn))))
+        self.table_container.content = data_table(
+            self.page,
+            [("الكود", 120), ("الاسم", 260), ("المورد", 200),
+             ("المخزون", 100), ("سعر البيع", 140), ("", 90)],
+            rows, "لا توجد منتجات بعد. أضف منتجك الأول.", ctx)
+        try:
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _open_add_dialog(self, e=None):
+        self._open_form_dialog(None)
+
+    def _open_edit_dialog(self, product_id):
+        p = get_product_by_id(product_id)
+        if p is not None:
+            self._open_form_dialog(p)
+
+    def _open_form_dialog(self, product):
+        is_edit = product is not None
+        code = text_field("كود المنتج *",
+                          value=product["code"] if is_edit else "",
+                          width=300)
+        name = text_field("اسم المنتج *",
+                          value=product["name"] if is_edit else "",
+                          width=400)
+        supplier = text_field("المورد",
+                              value=(product.get("supplier") or "")
+                              if is_edit else "",
+                              width=400)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            try:
+                if is_edit:
+                    update_product(product["id"], code=code.value,
+                                   name=name.value,
+                                   supplier=supplier.value)
+                else:
+                    add_product(code=code.value, name=name.value,
+                                supplier=supplier.value)
+            except Exception as ex:
+                error.value = str(ex)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            self._refresh()
+            snack(self.page,
+                  "تم تحديث المنتج." if is_edit else "تمت إضافة المنتج.",
+                  kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        content = ft.Column([code, name, supplier, error],
+                            spacing=SP_SM, width=420)
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text("تعديل المنتج" if is_edit else "إضافة منتج",
+                          color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=content,
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("حفظ", save, icon=ft.icons.CHECK,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _confirm_delete(self, product_id, name):
+        def do_delete():
+            delete_product(product_id)
+            self._refresh()
+            snack(self.page, f"تم حذف '{name}'.", kind="success")
+        confirm_dialog(self.page, "حذف المنتج",
+                       f"هل أنت متأكد من حذف '{name}'؟ "
+                       "لن تتأثر الفواتير السابقة.", do_delete,
+                       confirm_text="حذف", danger=True)
+
+
+# ---------------------------------------------------------------------------
+# PURCHASES VIEW
+# ---------------------------------------------------------------------------
+
+class PurchasesView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+
+        self.products = get_all_products()
+        self.product_dd = keyed_dropdown(
+            "المنتج",
+            [(p["code"], p["name"]) for p in self.products],
+            width=260, on_change=self._on_product_change)
+        self.name_field = text_field("اسم المنتج", read_only=True,
+                                     width=200)
+        self.supplier_field = text_field("المورد", read_only=True,
+                                         width=180)
+        self.qty_field = text_field(
+            "الكمية الواردة", width=130,
+            keyboard_type=ft.KeyboardType.NUMBER)
+        self.cost_field = text_field(
+            "سعر التكلفة", width=130,
+            keyboard_type=ft.KeyboardType.NUMBER)
+        self.selling_field = text_field(
+            "سعر البيع", width=130,
+            keyboard_type=ft.KeyboardType.NUMBER)
+        self.table_container = ft.Container(expand=True)
+
+    def _on_product_change(self, e):
+        code = self.product_dd.value
+        if code:
+            p = get_product_by_code(code)
+            if p:
+                self.name_field.value = p["name"]
+                self.supplier_field.value = p.get("supplier") or ""
+                self.selling_field.value = (
+                    f"{p['wholesale_price']:.2f}"
+                    if p["wholesale_price"] else "")
+                self.cost_field.value = (
+                    f"{p['cost_price']:.2f}"
+                    if p["cost_price"] else "")
+        else:
+            self.name_field.value = ""
+            self.supplier_field.value = ""
+            self.selling_field.value = ""
+            self.cost_field.value = ""
+        try:
+            self.name_field.update()
+            self.supplier_field.update()
+            self.selling_field.update()
+            self.cost_field.update()
+        except Exception:
+            pass
+
+    def build(self):
+        save_btn = primary_button("حفظ", self._on_add,
+                                  icon=ft.icons.SAVE, width=120)
+        form = card(
+            ft.Column(
+                [section_title("تسجيل عملية شراء جديدة"),
+                 ft.Container(height=SP_SM),
+                 ft.Row(
+                     [self.product_dd, self.name_field,
+                      self.supplier_field, self.qty_field,
+                      self.cost_field, self.selling_field, save_btn],
+                     spacing=SP_MD,
+                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                     wrap=True)],
+                spacing=0),
+            padding=SP_MD, hover=False)
+
+        self._refresh_table()
+
+        return ft.Column(
+            [page_title("المشتريات", "تسجيل المشتريات من الموردين"),
+             ft.Container(height=SP_SM),
+             form,
+             ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container],
+                            expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _on_add(self, e):
+        code = self.product_dd.value
+        if not code:
+            snack(self.page, "اختر المنتج أولاً.", kind="warning")
+            return
+        try:
+            create_purchase(
+                product_code=code,
+                quantity=self.qty_field.value,
+                purchase_price=self.cost_field.value,
+                selling_price=self.selling_field.value)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            return
+        self.product_dd.value = None
+        self.name_field.value = ""
+        self.supplier_field.value = ""
+        self.qty_field.value = ""
+        self.cost_field.value = ""
+        self.selling_field.value = ""
+        try:
+            self.product_dd.update()
+            self.name_field.update()
+            self.supplier_field.update()
+            self.qty_field.update()
+            self.cost_field.update()
+            self.selling_field.update()
+        except Exception:
+            pass
+        self._refresh_table()
+        snack(self.page, "تم تسجيل الشراء وتحديث المخزون.",
+              kind="success")
+
+    def _refresh_table(self):
+        purchases = get_all_purchases()
+        rows, ctx = [], []
+        for p in purchases:
+            actions = ft.Row(
+                [icon_button(ft.icons.EDIT,
+                             lambda e, pid=p["id"]:
+                                 self._open_edit_dialog(pid),
+                             tooltip="تعديل"),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, pid=p["id"], pn=p["product_name"]:
+                                 self._confirm_delete(pid, pn),
+                             tooltip="حذف", color=DANGER)],
+                spacing=4)
+            rows.append([
+                ft.Text(str(p["id"]), color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(p["created_at"][:10], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(p["product_name"], color=TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_600),
+                ft.Text(p["supplier"] or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+                ft.Text(str(p["quantity"]), color=TEXT_PRIMARY,
+                        size=FS_SMALL),
+                ft.Text(money_str(p["purchase_price"], self.currency),
+                        color=TEXT_SECONDARY, size=FS_SMALL),
+                ft.Text(money_str(p["selling_price"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL),
+                ft.Text(money_str(p["total_cost"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                actions])
+            ctx.append((
+                (lambda pid=p["id"]: self._open_edit_dialog(pid)),
+                (lambda pid=p["id"], pn=p["product_name"]:
+                 self._confirm_delete(pid, pn))))
+        self.table_container.content = data_table(
+            self.page,
+            [("#", 55), ("التاريخ", 100), ("المنتج", 180),
+             ("المورد", 130), ("الكمية", 75), ("سعر الشراء", 110),
+             ("سعر البيع", 110), ("الإجمالي", 110), ("", 80)],
+            rows, "لا توجد عمليات شراء مسجلة بعد.", ctx)
+        try:
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _open_edit_dialog(self, purchase_id):
+        p = get_purchase_by_id(purchase_id)
+        if p is None:
+            return
+        products = get_all_products()
+        product_dd = keyed_dropdown(
+            "المنتج",
+            [(x["code"], x["name"]) for x in products],
+            value=p["product_code"], width=280)
+        qty = text_field("الكمية", value=str(p["quantity"]),
+                         width=140,
+                         keyboard_type=ft.KeyboardType.NUMBER)
+        cost = text_field("سعر التكلفة",
+                          value=f"{p['purchase_price']:.2f}",
+                          width=160,
+                          keyboard_type=ft.KeyboardType.NUMBER)
+        price = text_field("سعر البيع",
+                           value=f"{p['selling_price']:.2f}",
+                           width=160,
+                           keyboard_type=ft.KeyboardType.NUMBER)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            try:
+                update_purchase(
+                    purchase_id,
+                    product_code=product_dd.value,
+                    quantity=qty.value,
+                    purchase_price=cost.value,
+                    selling_price=price.value)
+            except Exception as ex:
+                error.value = str(ex)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            self._refresh_table()
+            snack(self.page, "تم تحديث عملية الشراء.", kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        content = ft.Column(
+            [product_dd, ft.Row([qty, cost, price], spacing=SP_MD),
+             error], spacing=SP_SM, width=480)
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text("تعديل عملية الشراء",
+                          color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=content,
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("حفظ", save, icon=ft.icons.CHECK,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _confirm_delete(self, purchase_id, product_name):
+        def do_delete():
+            try:
+                delete_purchase(purchase_id)
+                self._refresh_table()
+                snack(self.page,
+                      f"تم حذف عملية شراء '{product_name}'.",
+                      kind="success")
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+        confirm_dialog(
+            self.page, "حذف عملية الشراء",
+            f"هل تريد حذف عملية شراء '{product_name}'؟ "
+            "سيتم خصم الكمية من المخزون.", do_delete,
+            confirm_text="حذف", danger=True)
+
+
+# ---------------------------------------------------------------------------
+# SUPPLIERS VIEW
+# ---------------------------------------------------------------------------
+
+class SuppliersView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.search = text_field("بحث…", prefix_icon=ft.icons.SEARCH,
+                                 on_change=self._on_search, width=280)
+        self.table_container = ft.Container(expand=True)
+
+    def build(self):
+        header = ft.Row(
+            [page_title("الموردون", "دليل الموردين"),
+             ft.Container(expand=True), self.search,
+             primary_button("إضافة مورد", self._open_add_dialog,
+                            icon=ft.icons.ADD, width=160)],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_MD)
+        self._refresh()
+        return ft.Column(
+            [header, ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container], expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _on_search(self, e):
+        self._refresh()
+
+    def _refresh(self):
+        suppliers = get_all_suppliers(search=self.search.value or "")
+        rows, ctx = [], []
+        for s in suppliers:
+            actions = ft.Row(
+                [icon_button(ft.icons.EDIT,
+                             lambda e, sid=s["id"]:
+                                 self._open_edit_dialog(sid),
+                             tooltip="تعديل"),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, sid=s["id"], sn=s["name"]:
+                                 self._confirm_delete(sid, sn),
+                             tooltip="حذف", color=DANGER)],
+                spacing=4)
+            rows.append([
+                ft.Text(s["name"], color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_600),
+                ft.Text(s["phone"] or "—", color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(s["address"] or "—", color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text((s["notes"] or "—")[:60], color=TEXT_MUTED,
+                        size=FS_SMALL),
+                actions])
+            ctx.append((
+                (lambda sid=s["id"]: self._open_edit_dialog(sid)),
+                (lambda sid=s["id"], sn=s["name"]:
+                 self._confirm_delete(sid, sn))))
+        self.table_container.content = data_table(
+            self.page,
+            [("الاسم", 220), ("الهاتف", 160), ("العنوان", 240),
+             ("ملاحظات", 280), ("", 90)],
+            rows, "لا يوجد موردون بعد.", ctx)
+        try:
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _open_add_dialog(self, e=None):
+        self._open_form_dialog(None)
+
+    def _open_edit_dialog(self, supplier_id):
+        s = get_supplier_by_id(supplier_id)
+        if s is not None:
+            self._open_form_dialog(s)
+
+    def _open_form_dialog(self, supplier):
+        is_edit = supplier is not None
+        name = text_field("الاسم *",
+                          value=supplier["name"] if is_edit else "",
+                          width=400)
+        phone = text_field("الهاتف",
+                           value=supplier["phone"] if is_edit else "",
+                           width=220)
+        address = text_field("العنوان",
+                             value=supplier["address"] if is_edit else "",
+                             width=220)
+        notes = text_field("ملاحظات",
+                           value=supplier["notes"] if is_edit else "",
+                           multiline=True, width=440)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            try:
+                if is_edit:
+                    update_supplier(supplier["id"], name=name.value,
+                                    phone=phone.value,
+                                    address=address.value,
+                                    notes=notes.value)
+                else:
+                    add_supplier(name=name.value, phone=phone.value,
+                                 address=address.value,
+                                 notes=notes.value)
+            except Exception as ex:
+                error.value = str(ex)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            self._refresh()
+            snack(self.page,
+                  "تم تحديث المورد." if is_edit
+                  else "تمت إضافة المورد.", kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        content = ft.Column(
+            [name, ft.Row([phone, address], spacing=SP_MD), notes, error],
+            spacing=SP_SM, width=460)
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text("تعديل المورد" if is_edit else "إضافة مورد",
+                          color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=content,
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("حفظ", save, icon=ft.icons.CHECK,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _confirm_delete(self, supplier_id, name):
+        def do_delete():
+            delete_supplier(supplier_id)
+            self._refresh()
+            snack(self.page, f"تم حذف '{name}'.", kind="success")
+        confirm_dialog(self.page, "حذف المورد",
+                       f"هل أنت متأكد من حذف '{name}'؟", do_delete,
+                       confirm_text="حذف", danger=True)
+
+
+# ---------------------------------------------------------------------------
+# EXPENSES VIEW
+# ---------------------------------------------------------------------------
+
+class ExpensesView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+        self.total_text = ft.Text(money_str(0, self.currency),
+                                  color=TEXT_PRIMARY, size=20,
+                                  weight=ft.FontWeight.W_900)
+        self.table_container = ft.Container(expand=True)
+
+    def build(self):
+        header = ft.Row(
+            [page_title("المصروفات", "المصاريف التشغيلية"),
+             ft.Container(expand=True),
+             primary_button("إضافة مصروف", self._open_add_dialog,
+                            icon=ft.icons.ADD, width=160)],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
+        self._refresh()
+        return ft.Column(
+            [header, ft.Container(height=SP_SM),
+             card(ft.Row([ft.Column(
+                 [ft.Text("إجمالي المصروفات المسجلة",
+                          color=TEXT_SECONDARY, size=FS_SMALL),
+                  self.total_text], spacing=2)],
+                 vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                 padding=SP_SM, hover=False),
+             ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container], expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _refresh(self):
+        expenses = get_expenses()
+        self.total_text.value = money_str(get_total_expenses(),
+                                          self.currency)
+        rows, ctx = [], []
+        for ex in expenses:
+            actions = ft.Row(
+                [icon_button(ft.icons.EDIT,
+                             lambda e, exid=ex["id"]:
+                                 self._open_edit_dialog(exid),
+                             tooltip="تعديل"),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, exid=ex["id"], ec=ex["category"]:
+                                 self._confirm_delete(exid, ec),
+                             tooltip="حذف", color=DANGER)],
+                spacing=4)
+            rows.append([
+                ft.Text(ex["date"], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(ex["category"], color=TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_600),
+                ft.Text(money_str(ex["amount"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                ft.Text(ex["notes"] or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+                actions])
+            ctx.append((
+                (lambda exid=ex["id"]: self._open_edit_dialog(exid)),
+                (lambda exid=ex["id"], ec=ex["category"]:
+                 self._confirm_delete(exid, ec))))
+        self.table_container.content = data_table(
+            self.page,
+            [("التاريخ", 140), ("الفئة", 200), ("المبلغ", 140),
+             ("ملاحظات", 400), ("", 90)],
+            rows, "لا توجد مصروفات مسجلة بعد.", ctx)
+        try:
+            self.total_text.update()
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _open_add_dialog(self, e=None):
+        self._open_form_dialog(None)
+
+    def _open_edit_dialog(self, expense_id):
+        ex = get_expense_by_id(expense_id)
+        if ex is not None:
+            self._open_form_dialog(ex)
+
+    def _open_form_dialog(self, expense):
+        is_edit = expense is not None
+        cats = ["إيجار", "مرافق", "رواتب", "مواصلات", "مستلزمات",
+                "صيانة", "تسويق", "أخرى"]
+        for c in get_expense_categories():
+            if c not in cats:
+                cats.append(c)
+        category = dropdown(
+            "الفئة *", cats,
+            value=(expense["category"] if is_edit else cats[0]),
+            width=220)
+        amount = text_field(
+            "المبلغ *",
+            value=(f"{expense['amount']:.2f}" if is_edit else "0.00"),
+            width=200, keyboard_type=ft.KeyboardType.NUMBER)
+        exp_date = text_field(
+            "التاريخ",
+            value=(expense["date"] if is_edit
+                   else date.today().isoformat()),
+            width=200)
+        notes = text_field("ملاحظات",
+                           value=expense["notes"] if is_edit else "",
+                           multiline=True, width=420)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            try:
+                if is_edit:
+                    update_expense(expense["id"],
+                                   category=category.value,
+                                   amount=amount.value,
+                                   notes=notes.value,
+                                   expense_date=exp_date.value)
+                else:
+                    add_expense(category=category.value,
+                                amount=amount.value,
+                                notes=notes.value,
+                                expense_date=exp_date.value)
+            except Exception as ex2:
+                error.value = str(ex2)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            self._refresh()
+            snack(self.page,
+                  "تم تحديث المصروف." if is_edit
+                  else "تمت إضافة المصروف.", kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        content = ft.Column(
+            [ft.Row([category, amount, exp_date], spacing=SP_MD), notes,
+             error], spacing=SP_SM, width=460)
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text("تعديل المصروف" if is_edit else "إضافة مصروف",
+                          color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=content,
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("حفظ", save, icon=ft.icons.CHECK,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _confirm_delete(self, expense_id, category):
+        def do_delete():
+            delete_expense(expense_id)
+            self._refresh()
+            snack(self.page, "تم حذف المصروف.", kind="success")
+        confirm_dialog(self.page, "حذف المصروف",
+                       f"حذف مصروف '{category}'؟", do_delete,
+                       confirm_text="حذف", danger=True)
+
+
+# ---------------------------------------------------------------------------
+# SEASONS VIEW
+# ---------------------------------------------------------------------------
+
+class SeasonsView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.container = ft.Container(expand=True)
+
+    def build(self):
+        self._refresh()
+        return self.container
+
+    def _refresh(self):
+        seasons = get_all_seasons()
+        cards = ft.Row(spacing=SP_LG, wrap=True)
+        for s in seasons:
+            is_on = s["status"] == "on"
+
+            def make_toggle(sid=s["id"]):
+                def _toggle(e, sid=sid):
+                    new_val = bool(e.control.value)
+                    current = next(
+                        (x for x in get_all_seasons() if x["id"] == sid),
+                        None)
+                    if current is None:
+                        return
+                    if new_val == (current["status"] == "on"):
+                        return
+
+                    def commit():
+                        try:
+                            set_season_status(sid, new_val)
+                            self._refresh()
+                            snack(
+                                self.page,
+                                ("تم تفعيل الموسم." if new_val
+                                 else "تم إيقاف الموسم وحفظ نسخة "
+                                      "احتياطية ثم مسح البيانات."),
+                                kind="success")
+                        except Exception as ex:
+                            snack(self.page, str(ex), kind="error")
+
+                    if new_val:
+                        commit()
+                    else:
+                        confirm_dialog(
+                            self.page, "إيقاف الموسم",
+                            "سيتم أخذ نسخة احتياطية تلقائية ثم مسح جميع "
+                            "حركات الموسم (المخزون، المشتريات، المبيعات، "
+                            "المصروفات). الموردون وأرقام الفواتير تبقى "
+                            "محفوظة. متابعة؟",
+                            commit, confirm_text="إيقاف", danger=True)
+                return _toggle
+
+            sw = ft.Switch(value=is_on, on_change=make_toggle(),
+                           active_color=SUCCESS)
+            status_color = SUCCESS if is_on else TEXT_MUTED
+            status_text = "مفعّل" if is_on else "متوقف"
+
+            cards.controls.append(ft.Container(
+                content=ft.Column(
+                    [ft.Row(
+                        [ft.Icon(ft.icons.CALENDAR_MONTH, size=24,
+                                 color=status_color),
+                         ft.Container(width=SP_SM),
+                         ft.Text(s["season_name"], color=TEXT_PRIMARY,
+                                 size=FS_SECTION,
+                                 weight=ft.FontWeight.W_800,
+                                 expand=True)],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                     ft.Container(height=SP_SM),
+                     ft.Row(
+                         [ft.Text("الحالة:", color=TEXT_MUTED,
+                                  size=FS_SMALL),
+                          chip(status_text, color=status_color,
+                               bg=BG_INPUT)],
+                         spacing=SP_SM),
+                     ft.Container(height=SP_SM),
+                     ft.Row(
+                         [ft.Text("التشغيل/الإيقاف",
+                                  color=TEXT_SECONDARY, size=FS_SMALL),
+                          ft.Container(expand=True), sw],
+                         vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                     ft.Container(height=SP_SM), divider(),
+                     ft.Container(height=SP_SM),
+                     ft.Text(
+                         f"تاريخ التفعيل: {s['activated_at'] or '—'}",
+                         color=TEXT_MUTED, size=FS_TINY),
+                     ft.Text(
+                         f"تاريخ الإغلاق: {s['closed_at'] or '—'}",
+                         color=TEXT_MUTED, size=FS_TINY)],
+                    spacing=4),
+                bgcolor=BG_CARD, border=ft.border.all(1, BORDER),
+                border_radius=RADIUS_MD, padding=SP_MD,
+                width=320, height=260, on_hover=_hover_card))
+
+        history_rows = []
+        for s in seasons:
+            status_color = SUCCESS if s["status"] == "on" else TEXT_MUTED
+            history_rows.append([
+                ft.Text(s["season_name"], color=TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_600),
+                chip("مفعّل" if s["status"] == "on" else "متوقف",
+                     color=status_color, bg=BG_INPUT),
+                ft.Text(s["activated_at"] or "—", color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(s["closed_at"] or "—", color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+            ])
+
+        self.container.content = ft.Column(
+            [page_title("المواسم",
+                        "تشغيل/إيقاف المواسم الثلاثة المتعاقبة"),
+             ft.Container(height=SP_MD),
+             cards,
+             ft.Container(height=SP_LG),
+             card(ft.Column([section_title("سجل المواسم"),
+                             ft.Container(height=SP_SM),
+                             data_table(
+                                 self.page,
+                                 [("الموسم", 220), ("الحالة", 110),
+                                  ("تاريخ التفعيل", 190),
+                                  ("تاريخ الإغلاق", 190)],
+                                 history_rows,
+                                 "لا توجد مواسم.")],
+                            expand=True, spacing=0),
+                  padding=SP_MD, hover=False, expand=True)],
+            spacing=0, expand=True)
+        try:
+            self.container.update()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# REPORTS VIEW
+# ---------------------------------------------------------------------------
+
+class ReportsView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+        today = date.today()
+        self.date_from = text_field(
+            "من تاريخ",
+            value=(today - timedelta(days=30)).isoformat(),
+            width=140, on_change=self._refresh)
+        self.date_to = text_field(
+            "إلى تاريخ", value=today.isoformat(),
+            width=140, on_change=self._refresh)
+        self.summary_row = ft.Row(spacing=SP_SM, expand=False)
+        self.table_container = ft.Container(expand=True)
+        self.tabs_container = ft.Container()
+        self.report_type = "sales"
+        self.current_headers = []
+        self.current_rows_data = []
+
+    def build(self):
+        filters = ft.Row(
+            [page_title("التقارير", "المبيعات والمصروفات والأرباح"),
+             ft.Container(expand=True),
+             self.date_from, self.date_to,
+             ghost_button("آخر 7 أيام",
+                          lambda e: self._quick_range(7),
+                          width=120, height=42),
+             ghost_button("هذا الشهر",
+                          lambda e: self._quick_range_month(),
+                          width=120, height=42)],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=SP_SM)
+
+        self.tabs_container = ft.Container(content=self._build_tabs())
+        print_btn = primary_button(
+            "طباعة التقرير", self._on_print, icon=ft.icons.PRINT,
+            width=170, height=42)
+
+        self._refresh()
+
+        return ft.Column(
+            [filters,
+             ft.Container(height=SP_SM),
+             self.summary_row,
+             ft.Container(height=SP_SM),
+             ft.Row(
+                 [self.tabs_container, ft.Container(expand=True),
+                  print_btn],
+                 vertical_alignment=ft.CrossAxisAlignment.CENTER),
+             ft.Container(height=SP_SM),
+             card(ft.Column([self.table_container],
+                            expand=True, spacing=0),
+                  padding=0, hover=False, expand=True)],
+            spacing=0, expand=True)
+
+    def _build_tabs(self):
+        tabs = [
+            ("sales", "تقرير المبيعات"),
+            ("purchases", "تقرير المشتريات"),
+            ("expenses", "تقرير المصروفات"),
+            ("inventory", "تقرير المخزون"),
+            ("invoice_range", "تقرير أرقام الفواتير"),
+        ]
+        row = ft.Row(spacing=SP_SM)
+        for key, label in tabs:
+            is_active = self.report_type == key
+            btn = ft.Container(
+                content=ft.Text(
+                    label,
+                    color=BG_BLACK if is_active else TEXT_PRIMARY,
+                    size=FS_SMALL, weight=ft.FontWeight.W_700),
+                bgcolor=ACCENT if is_active else BG_INPUT,
+                border_radius=RADIUS_SM,
+                padding=ft.padding.symmetric(horizontal=14, vertical=8),
+                on_click=lambda e, k=key: self._switch_tab(k),
+                ink=True)
+            if not is_active:
+                btn.on_hover = _hover_ghost
+            row.controls.append(btn)
+        return row
+
+    def _switch_tab(self, key):
+        self.report_type = key
+        self.tabs_container.content = self._build_tabs()
+        self._refresh()
+        try:
+            self.tabs_container.update()
+        except Exception:
+            pass
+
+    def _quick_range(self, days):
+        today = date.today()
+        self.date_from.value = (
+            today - timedelta(days=days - 1)).isoformat()
+        self.date_to.value = today.isoformat()
+        try:
+            self.date_from.update()
+            self.date_to.update()
+        except Exception:
+            pass
+        self._refresh()
+
+    def _quick_range_month(self):
+        today = date.today()
+        self.date_from.value = today.replace(day=1).isoformat()
+        self.date_to.value = today.isoformat()
+        try:
+            self.date_from.update()
+            self.date_to.update()
+        except Exception:
+            pass
+        self._refresh()
+
+    def _refresh(self, e=None):
+        dfrom = self.date_from.value or None
+        dto = self.date_to.value or None
+        try:
+            report = get_profit_report(dfrom, dto)
+        except Exception:
+            report = {"revenue": 0, "cogs": 0, "gross_profit": 0,
+                      "expenses": 0, "net_profit": 0,
+                      "invoice_count": 0, "total_items": 0}
+
+        self.summary_row.controls = [
+            self._stat("إجمالي المبيعات",
+                       money_str(report["revenue"], self.currency),
+                       TEXT_PRIMARY, ft.icons.POINT_OF_SALE),
+            self._stat("إجمالي القطع",
+                       str(report["total_items"]),
+                       TEXT_PRIMARY, ft.icons.INVENTORY_2),
+            self._stat("المصروفات",
+                       money_str(report["expenses"], self.currency),
+                       WARNING, ft.icons.RECEIPT_LONG),
+            self._stat("صافي الربح",
+                       money_str(report["net_profit"], self.currency),
+                       SUCCESS if report["net_profit"] >= 0 else DANGER,
+                       ft.icons.SAVINGS),
+        ]
+        try:
+            self.summary_row.update()
+        except Exception:
+            pass
+
+        self._refresh_report_table(dfrom, dto)
+
+    def _refresh_report_table(self, dfrom, dto):
+        if self.report_type == "sales":
+            self._show_sales_report(dfrom, dto)
+        elif self.report_type == "purchases":
+            self._show_purchases_report(dfrom, dto)
+        elif self.report_type == "expenses":
+            self._show_expenses_report(dfrom, dto)
+        elif self.report_type == "inventory":
+            self._show_inventory_report()
+        elif self.report_type == "invoice_range":
+            self._show_invoice_range_report(dfrom, dto)
+        try:
+            self.table_container.update()
+        except Exception:
+            pass
+
+    def _show_sales_report(self, dfrom, dto):
+        invoices = get_invoices_in_range(dfrom, dto)
+        self.current_headers = ["رقم الفاتورة", "التاريخ", "العميل",
+                                "القطع", "الإجمالي"]
+        self.current_rows_data = [
+            [str(i.get("invoice_number") or i["id"]),
+             i["created_at"][:10], i["customer_name"] or "—",
+             str(i["total_items"]),
+             money_str(i["net_total"], self.currency)]
+            for i in invoices]
+        rows = []
+        for i in invoices:
+            rows.append([
+                ft.Text(str(i.get("invoice_number") or i["id"]),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                ft.Text(i["created_at"][:10], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(i["customer_name"] or "—", color=TEXT_PRIMARY,
+                        size=FS_SMALL),
+                ft.Text(str(i["total_items"]), color=TEXT_PRIMARY,
+                        size=FS_SMALL),
+                ft.Text(money_str(i["net_total"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+            ])
+        self.table_container.content = data_table(
+            self.page,
+            [("رقم الفاتورة", 130), ("التاريخ", 140), ("العميل", 240),
+             ("القطع", 80), ("الإجمالي", 160)],
+            rows, "لا توجد فواتير في هذه الفترة.")
+
+    def _show_purchases_report(self, dfrom, dto):
+        purchases = get_purchases_in_range(dfrom, dto)
+        self.current_headers = ["التاريخ", "المنتج", "المورد",
+                                "الكمية", "سعر الشراء", "الإجمالي"]
+        self.current_rows_data = [
+            [p["created_at"][:10], p["product_name"],
+             p["supplier"] or "—", str(p["quantity"]),
+             money_str(p["purchase_price"], self.currency),
+             money_str(p["total_cost"], self.currency)]
+            for p in purchases]
+        rows = []
+        for p in purchases:
+            rows.append([
+                ft.Text(p["created_at"][:10], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(p["product_name"], color=TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_600),
+                ft.Text(p["supplier"] or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+                ft.Text(str(p["quantity"]), color=TEXT_PRIMARY,
+                        size=FS_SMALL),
+                ft.Text(money_str(p["purchase_price"], self.currency),
+                        color=TEXT_SECONDARY, size=FS_SMALL),
+                ft.Text(money_str(p["total_cost"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+            ])
+        self.table_container.content = data_table(
+            self.page,
+            [("التاريخ", 130), ("المنتج", 200), ("المورد", 150),
+             ("الكمية", 80), ("سعر الشراء", 120), ("الإجمالي", 140)],
+            rows, "لا توجد مشتريات في هذه الفترة.")
+
+    def _show_expenses_report(self, dfrom, dto):
+        expenses = get_expenses(date_from=dfrom, date_to=dto)
+        self.current_headers = ["التاريخ", "الفئة", "المبلغ", "ملاحظات"]
+        self.current_rows_data = [
+            [ex["date"], ex["category"],
+             money_str(ex["amount"], self.currency),
+             ex["notes"] or "—"] for ex in expenses]
+        rows = []
+        for ex in expenses:
+            rows.append([
+                ft.Text(ex["date"], color=TEXT_SECONDARY,
+                        size=FS_SMALL),
+                ft.Text(ex["category"], color=TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_600),
+                ft.Text(money_str(ex["amount"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_700),
+                ft.Text(ex["notes"] or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+            ])
+        self.table_container.content = data_table(
+            self.page,
+            [("التاريخ", 150), ("الفئة", 220), ("المبلغ", 160),
+             ("ملاحظات", 480)],
+            rows, "لا توجد مصروفات في هذه الفترة.")
+
+    def _show_inventory_report(self):
+        products = get_all_products()
+        self.current_headers = ["الكود", "الاسم", "المورد",
+                                "المخزون", "سعر البيع"]
+        self.current_rows_data = [
+            [p["code"], p["name"], p.get("supplier") or "—",
+             str(p["stock_qty"]),
+             money_str(p["wholesale_price"], self.currency)]
+            for p in products]
+        rows = []
+        for p in products:
+            low = p["min_limit"] > 0 and p["stock_qty"] <= p["min_limit"]
+            rows.append([
+                ft.Text(p["code"], color=TEXT_SECONDARY, size=FS_SMALL),
+                ft.Text(p["name"], color=TEXT_PRIMARY, size=FS_SMALL,
+                        weight=ft.FontWeight.W_600),
+                ft.Text(p.get("supplier") or "—", color=TEXT_MUTED,
+                        size=FS_SMALL),
+                ft.Text(str(p["stock_qty"]),
+                        color=DANGER if low else TEXT_PRIMARY,
+                        size=FS_SMALL, weight=ft.FontWeight.W_700),
+                ft.Text(money_str(p["wholesale_price"], self.currency),
+                        color=TEXT_PRIMARY, size=FS_SMALL),
+            ])
+        self.table_container.content = data_table(
+            self.page,
+            [("الكود", 110), ("الاسم", 260), ("المورد", 200),
+             ("المخزون", 100), ("سعر البيع", 140)],
+            rows, "لا توجد منتجات.")
+
+    def _show_invoice_range_report(self, dfrom, dto):
+        info = get_invoice_number_range(dfrom, dto)
+        self.current_headers = ["البند", "القيمة"]
+        self.current_rows_data = [
+            ["أقل رقم فاتورة", str(info["min_n"] or "—")],
+            ["أكبر رقم فاتورة", str(info["max_n"] or "—")],
+            ["عدد الفواتير", str(info["count"])],
+            ["نطاق الأرقام",
+             (f"{info['min_n']} → {info['max_n']}"
+              if info["min_n"] and info["max_n"] else "—")],
+            ["الحد الأدنى للنظام", str(INVOICE_START_NUMBER)],
+        ]
+        rows = [
+            [ft.Text(a, color=TEXT_SECONDARY, size=FS_SMALL),
+             ft.Text(b, color=TEXT_PRIMARY, size=FS_SMALL,
+                     weight=ft.FontWeight.W_700)]
+            for a, b in self.current_rows_data
+        ]
+        self.table_container.content = data_table(
+            self.page,
+            [("البند", 260), ("القيمة", 400)],
+            rows, "لا توجد فواتير.")
+
+    def _stat(self, label, value, color, icon):
+        return ft.Container(
+            content=ft.Row(
+                [ft.Container(
+                    content=ft.Icon(icon, size=22, color=color),
+                    width=44, height=44, bgcolor=BG_INPUT,
+                    border_radius=RADIUS_SM,
+                    alignment=ft.alignment.center),
+                 ft.Container(width=SP_SM),
+                 ft.Column(
+                     [ft.Text(label, color=TEXT_MUTED, size=FS_TINY,
+                              weight=ft.FontWeight.W_700),
+                      ft.Text(value, color=color, size=18,
+                              weight=ft.FontWeight.W_800)],
+                     spacing=2, tight=True, expand=True)],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=SP_MD, bgcolor=BG_CARD,
+            border=ft.border.all(1, BORDER), border_radius=RADIUS_MD,
+            expand=True, height=80, on_hover=_hover_card)
+
+    def _build_report_text(self):
+        W = 60
+        titles = {
+            "sales": "تقرير المبيعات",
+            "purchases": "تقرير المشتريات",
+            "expenses": "تقرير المصروفات",
+            "inventory": "تقرير المخزون",
+            "invoice_range": "تقرير أرقام الفواتير",
+        }
+        lines = ["=" * W, "SIERRA STORE".center(W),
+                 titles.get(self.report_type, "تقرير").center(W),
+                 "-" * W,
+                 f"من: {self.date_from.value or '—'}   "
+                 f"إلى: {self.date_to.value or '—'}",
+                 "=" * W]
+        if self.current_headers:
+            lines.append(" | ".join(self.current_headers))
+            lines.append("-" * W)
+        for row in self.current_rows_data:
+            lines.append(" | ".join(str(x) for x in row))
+        lines.append("=" * W)
+        lines.append(f"عدد السجلات: {len(self.current_rows_data)}")
+        return "\n".join(lines)
+
+    def _on_print(self, e):
+        text = self._build_report_text()
+
+        def do_copy(e):
+            try:
+                self.page.set_clipboard(text)
+                snack(self.page, "تم نسخ التقرير إلى الحافظة.",
+                      kind="success")
+            except Exception:
+                snack(self.page, "النسخ غير مدعوم.", kind="error")
+
+        def send_print(e):
+            msg = try_send_to_printer(text)
+            if msg:
+                snack(self.page, msg, kind="success")
+            else:
+                snack(self.page,
+                      "لم يتم العثور على طابعة حرارية مُهيأة "
+                      "(يمكن ضبط اسم الطابعة من الإعدادات).",
+                      kind="warning")
+
+        def close(e):
+            self.page.close(dlg)
+
+        field = ft.TextField(
+            value=text, multiline=True, min_lines=18, max_lines=28,
+            read_only=True,
+            text_style=ft.TextStyle(font_family="Courier New",
+                                    size=FS_SMALL,
+                                    color=TEXT_PRIMARY),
+            bgcolor=BG_INPUT, border_color=BORDER,
+            border_radius=RADIUS_SM, width=540)
+
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text("طباعة التقرير", color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=field,
+            actions=[ghost_button("نسخ", do_copy, icon=ft.icons.COPY,
+                                  width=110),
+                     ghost_button("طباعة", send_print,
+                                  icon=ft.icons.PRINT, width=110),
+                     primary_button("إغلاق", close, width=110)])
+        self.page.open(dlg)
+
+
+# ---------------------------------------------------------------------------
+# SETTINGS VIEW
+# ---------------------------------------------------------------------------
+
+class SettingsView:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.currency = get_currency_symbol()
+        self.container = ft.Container(expand=True)
+        self._load_settings()
+
+    def _load_settings(self):
+        s = get_all_settings()
+        paper_raw = str(s.get("printer_paper_width", "80mm"))
+        paper_raw = paper_raw.replace("mm", "").strip()
+        paper_val = (f"{paper_raw}mm"
+                     if paper_raw in ("58", "80") else "80mm")
+        self.invoice_header_field = text_field(
+            "ترويسة الفاتورة", value=s.get("invoice_header", ""),
+            multiline=True, width=500)
+        self.invoice_footer_field = text_field(
+            "تذييل الفاتورة", value=s.get("invoice_footer", ""),
+            multiline=True, width=500)
+        self.currency_field = text_field(
+            "رمز العملة", value=s.get("currency_symbol", "ج.م"),
+            width=180)
+        self.printer_name = text_field(
+            "اسم الطابعة (اختياري)",
+            value=s.get("printer_name", ""), width=320)
+        self.paper_width = dropdown(
+            "عرض الورق", ["58mm", "80mm"],
+            value=paper_val, width=180)
+        self.font_size = text_field(
+            "حجم خط الإيصال",
+            value=s.get("printer_font_size", "12"),
+            width=180, keyboard_type=ft.KeyboardType.NUMBER)
+        self.users_container = ft.Container(expand=True)
+
+    def build(self):
+        self._show_hub()
+        return self.container
+
+    def _show_hub(self):
+        invoice_card = self._tile(
+            "إعدادات الفاتورة",
+            "ترويسة وتذييل الفاتورة وإعدادات الطابعة.",
+            ft.icons.RECEIPT_LONG, self._show_invoice_settings)
+        users_card = self._tile(
+            "إدارة المستخدمين",
+            "إضافة وحذف المستخدمين وتعديل كلمات المرور.",
+            ft.icons.MANAGE_ACCOUNTS, self._show_user_management)
+        backup_card = self._tile(
+            "نسخ احتياطي",
+            "حفظ نسخة من قاعدة البيانات في موقع تحدده.",
+            ft.icons.BACKUP, self._on_backup)
+        restore_card = self._tile(
+            "استعادة البيانات",
+            "استرجاع قاعدة البيانات من نسخة احتياطية.",
+            ft.icons.RESTORE, self._on_restore)
+        clear_card = self._tile(
+            "مسح بيانات النظام",
+            "مسح الحركات (فواتير، مشتريات، مصروفات، مخزون).",
+            ft.icons.DELETE_FOREVER, self._on_clear_data)
+
+        self.container.content = ft.Column(
+            [page_title("الإعدادات", "إدارة التكوين والصيانة"),
+             ft.Container(height=SP_LG),
+             ft.Row([invoice_card, users_card],
+                    spacing=SP_LG, wrap=True),
+             ft.Container(height=SP_LG),
+             ft.Row([backup_card, restore_card, clear_card],
+                    spacing=SP_LG, wrap=True)],
+            spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+        self._update()
+
+    def _tile(self, title, description, icon, on_click):
+        content = ft.Column(
+            [ft.Container(
+                content=ft.Icon(icon, size=28, color=TEXT_PRIMARY),
+                width=56, height=56, bgcolor=BG_INPUT,
+                border_radius=RADIUS_MD,
+                alignment=ft.alignment.center),
+             ft.Container(height=SP_SM),
+             ft.Text(title, color=TEXT_PRIMARY, size=FS_SECTION,
+                     weight=ft.FontWeight.W_800),
+             ft.Text(description, color=TEXT_MUTED, size=FS_SMALL),
+             ft.Container(height=SP_SM),
+             ft.Row(
+                 [ft.Text("فتح", color=TEXT_PRIMARY, size=FS_BODY,
+                          weight=ft.FontWeight.W_700),
+                  ft.Icon(ft.icons.ARROW_FORWARD, size=16,
+                          color=TEXT_PRIMARY)],
+                 spacing=6)],
+            spacing=0)
+        return ft.Container(
+            content=content, bgcolor=BG_CARD,
+            border=ft.border.all(1, BORDER), border_radius=RADIUS_MD,
+            padding=SP_MD, width=300, height=200, ink=True,
+            on_click=lambda e: on_click(e),
+            on_hover=_hover_card)
+
+    def _show_invoice_settings(self, e=None):
+        back = ghost_button("رجوع", lambda ev: self._show_hub(),
+                            icon=ft.icons.ARROW_BACK, width=120)
+        save_btn = primary_button("حفظ", self._save_invoice,
+                                  icon=ft.icons.SAVE, width=140)
+        form = card(
+            ft.Column(
+                [section_title("تخصيص الفاتورة"),
+                 ft.Text("تُطبع على إيصالات 80 مم الحرارية.",
+                         color=TEXT_MUTED, size=FS_SMALL),
+                 ft.Container(height=SP_SM),
+                 self.invoice_header_field,
+                 self.invoice_footer_field,
+                 ft.Row([self.currency_field], spacing=SP_MD),
+                 ft.Container(height=SP_SM), divider(),
+                 ft.Container(height=SP_SM),
+                 section_title("الطابعة الحرارية"),
+                 ft.Row([self.printer_name], spacing=SP_MD),
+                 ft.Row([self.paper_width, self.font_size],
+                        spacing=SP_MD),
+                 ft.Container(height=SP_MD), save_btn],
+                spacing=SP_SM),
+            padding=SP_MD, hover=False)
+        self.container.content = ft.Column(
+            [ft.Row([back, ft.Container(expand=True)]),
+             ft.Container(height=SP_SM),
+             page_title("إعدادات الفاتورة",
+                        "تخصيص نصوص وطابعة الفاتورة"),
+             ft.Container(height=SP_SM),
+             form],
+            spacing=0, expand=True)
+        self._update()
+
+    def _save_invoice(self, e=None):
+        try:
+            set_settings({
+                "invoice_header": self.invoice_header_field.value or "",
+                "invoice_footer": self.invoice_footer_field.value or "",
+                "currency_symbol": self.currency_field.value or "ج.م",
+                "printer_name": self.printer_name.value or "",
+                "printer_paper_width":
+                    self.paper_width.value or "80mm",
+                "printer_font_size": self.font_size.value or "12",
+            })
+            snack(self.page, "تم حفظ الإعدادات.", kind="success")
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+
+    def _show_user_management(self, e=None):
+        back = ghost_button("رجوع", lambda ev: self._show_hub(),
+                            icon=ft.icons.ARROW_BACK, width=120)
+        add_username = text_field("اسم المستخدم", width=220)
+        add_password = text_field("كلمة المرور", password=True,
+                                  width=220)
+        add_role = dropdown("الدور", ["admin", "user"],
+                            value="user", width=160)
+
+        def do_add(e):
+            try:
+                create_user(add_username.value, add_password.value,
+                            add_role.value)
+                add_username.value = ""
+                add_password.value = ""
+                add_role.value = "user"
+                try:
+                    add_username.update()
+                    add_password.update()
+                    add_role.update()
+                except Exception:
+                    pass
+                self._refresh_users()
+                snack(self.page, "تم إنشاء المستخدم.", kind="success")
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+
+        add_form = card(
+            ft.Column(
+                [section_title("إضافة مستخدم جديد"),
+                 ft.Container(height=SP_SM),
+                 ft.Row(
+                     [add_username, add_password, add_role,
+                      primary_button("إضافة", do_add,
+                                     icon=ft.icons.ADD, width=110)],
+                     spacing=SP_MD,
+                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                     wrap=True)],
+                spacing=0),
+            padding=SP_MD, hover=False)
+        self._refresh_users()
+        users_card = card(
+            ft.Column(
+                [section_title("قائمة المستخدمين"),
+                 ft.Container(height=SP_SM),
+                 ft.Container(content=self.users_container,
+                              expand=True)],
+                spacing=0, expand=True),
+            padding=SP_MD, hover=False, expand=True)
+        self.container.content = ft.Column(
+            [ft.Row([back, ft.Container(expand=True)]),
+             ft.Container(height=SP_SM),
+             page_title("إدارة المستخدمين",
+                        "إضافة وحذف وتعديل المستخدمين"),
+             ft.Container(height=SP_SM),
+             add_form,
+             ft.Container(height=SP_SM),
+             users_card],
+            spacing=0, expand=True)
+        self._update()
+
+    def _refresh_users(self):
+        users = get_all_users()
+        rows, ctx = [], []
+        for u in users:
+            is_self = u["id"] == self.user["id"]
+            role_color = (SUCCESS if u["role"] == ROLE_ADMIN
+                          else TEXT_SECONDARY)
+            actions = ft.Row(
+                [icon_button(ft.icons.KEY,
+                             lambda e, uid=u["id"], un=u["username"]:
+                                 self._open_change_password(uid, un),
+                             tooltip="تغيير كلمة المرور"),
+                 icon_button(ft.icons.BADGE,
+                             lambda e, uid=u["id"], r=u["role"]:
+                                 self._toggle_role(uid, r),
+                             tooltip="تبديل الدور"),
+                 icon_button(ft.icons.DELETE,
+                             lambda e, uid=u["id"], un=u["username"],
+                             s=is_self:
+                                 self._confirm_delete_user(uid, un, s),
+                             tooltip="حذف", color=DANGER)],
+                spacing=4)
+            name_row = ft.Row(
+                [ft.Text(u["username"], color=TEXT_PRIMARY,
+                         size=FS_SMALL, weight=ft.FontWeight.W_600)]
+                + ([chip("أنت", color=TEXT_MUTED, bg=BG_INPUT)]
+                   if is_self else []),
+                spacing=6)
+            rows.append([
+                name_row,
+                chip("مسؤول" if u["role"] == ROLE_ADMIN else "كاشير",
+                     color=role_color, bg=BG_INPUT),
+                ft.Text(u["created_at"], color=TEXT_MUTED,
+                        size=FS_TINY),
+                actions])
+            ctx.append((
+                (lambda uid=u["id"], un=u["username"]:
+                 self._open_change_password(uid, un)),
+                (lambda uid=u["id"], un=u["username"], s=is_self:
+                 self._confirm_delete_user(uid, un, s))))
+        self.users_container.content = data_table(
+            self.page,
+            [("اسم المستخدم", 220), ("الدور", 140),
+             ("تاريخ الإنشاء", 190), ("", 120)],
+            rows, "لا يوجد مستخدمون.", ctx)
+        try:
+            self.users_container.update()
+        except Exception:
+            pass
+
+    def _open_change_password(self, user_id, username):
+        new_pw = text_field("كلمة المرور الجديدة", password=True,
+                            width=300)
+        confirm = text_field("تأكيد كلمة المرور", password=True,
+                             width=300)
+        error = ft.Text("", color=DANGER, size=FS_SMALL, visible=False)
+
+        def save(e):
+            error.visible = False
+            if new_pw.value != confirm.value:
+                error.value = "كلمتا المرور غير متطابقتين."
+                error.visible = True
+                error.update()
+                return
+            try:
+                update_user_password(user_id, new_pw.value)
+            except Exception as ex:
+                error.value = str(ex)
+                error.visible = True
+                error.update()
+                return
+            self.page.close(dlg)
+            snack(self.page,
+                  f"تم تحديث كلمة المرور لـ '{username}'.",
+                  kind="success")
+
+        def cancel(e=None):
+            self.page.close(dlg)
+
+        dlg = ft.AlertDialog(
+            modal=True, bgcolor=BG_CARD,
+            title=ft.Text(f"تغيير كلمة المرور — {username}",
+                          color=TEXT_PRIMARY,
+                          weight=ft.FontWeight.W_700,
+                          size=FS_SECTION),
+            content=ft.Column([new_pw, confirm, error],
+                              spacing=SP_SM, width=320),
+            actions=[ghost_button("إلغاء", cancel, width=110),
+                     primary_button("تحديث", save, icon=ft.icons.SAVE,
+                                    width=110)])
+        self.page.open(dlg)
+
+    def _toggle_role(self, user_id, current_role):
+        new_role = (ROLE_USER if current_role == ROLE_ADMIN
+                    else ROLE_ADMIN)
+        try:
+            update_user_role(user_id, new_role)
+            self._refresh_users()
+            snack(self.page, f"تم تغيير الدور إلى '{new_role}'.",
+                  kind="success")
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+
+    def _confirm_delete_user(self, user_id, username, is_self):
+        if is_self:
+            snack(self.page, "لا يمكنك حذف حسابك الحالي.",
+                  kind="warning")
+            return
+
+        def do_delete():
+            try:
+                delete_user(user_id)
+                self._refresh_users()
+                snack(self.page, f"تم حذف المستخدم '{username}'.",
+                      kind="success")
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+
+        confirm_dialog(self.page, "حذف المستخدم",
+                       f"حذف المستخدم '{username}'؟ "
+                       "لا يمكن التراجع عن هذا الإجراء.", do_delete,
+                       confirm_text="حذف", danger=True)
+
+    def _add_picker(self, picker):
+        try:
+            if hasattr(self.page, "services"):
+                self.page.services.append(picker)
+            elif hasattr(self.page, "overlay"):
+                self.page.overlay.append(picker)
+            self.page.update()
+        except Exception:
+            pass
+
+    def _remove_picker(self, picker):
+        try:
+            if hasattr(self.page, "services") \
+                    and picker in self.page.services:
+                self.page.services.remove(picker)
+        except Exception:
+            pass
+        try:
+            if hasattr(self.page, "overlay") \
+                    and picker in self.page.overlay:
+                self.page.overlay.remove(picker)
+        except Exception:
+            pass
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _extract_path(e):
+        if e is None:
+            return None
+        path = getattr(e, "path", None)
+        if path:
+            return path
+        files = getattr(e, "files", None)
+        if files:
+            try:
+                p = getattr(files[0], "path", None)
+                if p:
+                    return p
+            except Exception:
+                return None
+        return None
+
+    async def _async_save(self, picker, default_name):
+        try:
+            await picker.save_file(
+                dialog_title="حفظ النسخة الاحتياطية",
+                file_name=default_name,
+                allowed_extensions=["db"])
+        except TypeError:
+            try:
+                picker.save_file(dialog_title="حفظ النسخة الاحتياطية",
+                                 file_name=default_name,
+                                 allowed_extensions=["db"])
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+                self._remove_picker(picker)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            self._remove_picker(picker)
+
+    async def _async_pick(self, picker):
+        try:
+            await picker.pick_files(
+                dialog_title="اختر ملف النسخة الاحتياطية (.db)",
+                allow_multiple=False,
+                allowed_extensions=["db"])
+        except TypeError:
+            try:
+                picker.pick_files(
+                    dialog_title="اختر ملف النسخة الاحتياطية (.db)",
+                    allow_multiple=False,
+                    allowed_extensions=["db"])
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+                self._remove_picker(picker)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            self._remove_picker(picker)
+
+    def _on_backup(self, e=None):
+        picker = ft.FilePicker(
+            on_result=lambda ev: self._backup_result(ev, picker))
+        self._add_picker(picker)
+        default_name = (
+            f"sierra_backup_{datetime.now().strftime('%Y%m%d')}.db")
+        try:
+            self.page.run_task(self._async_save, picker, default_name)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            self._remove_picker(picker)
+
+    def _backup_result(self, e, picker):
+        try:
+            path = self._extract_path(e)
+            if not path:
+                return
+            if not path.lower().endswith(".db"):
+                path = path + ".db"
+            saved = backup_database(path)
+            snack(self.page,
+                  f"تم حفظ النسخة الاحتياطية في: {saved}",
+                  kind="success")
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+        finally:
+            self._remove_picker(picker)
+
+    def _on_restore(self, e=None):
+        picker = ft.FilePicker(
+            on_result=lambda ev: self._restore_pick_result(ev, picker))
+        self._add_picker(picker)
+        try:
+            self.page.run_task(self._async_pick, picker)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+            self._remove_picker(picker)
+
+    def _restore_pick_result(self, e, picker):
+        self._remove_picker(picker)
+        try:
+            path = self._extract_path(e)
+            if not path:
+                return
+
+            def do_restore():
+                try:
+                    restore_database_from(path)
+                except Exception as ex:
+                    snack(self.page, str(ex), kind="error")
+                    return
+                snack(self.page,
+                      "تمت الاستعادة بنجاح. سيتم تسجيل الخروج.",
+                      kind="success")
+                try:
+                    self.app.logout()
+                except Exception:
+                    pass
+
+            confirm_dialog(
+                self.page, "استعادة البيانات",
+                f"سيتم استبدال قاعدة البيانات الحالية بالنسخة المحددة:\n"
+                f"{path}\n\n"
+                "ستتم إعادة تسجيل الدخول بعد الاستعادة.\n\n"
+                "هل تريد المتابعة؟",
+                do_restore, confirm_text="استعادة", danger=True)
+        except Exception as ex:
+            snack(self.page, str(ex), kind="error")
+
+    def _on_clear_data(self, e=None):
+        def do_clear():
+            try:
+                backup_database()
+                clear_operational_data()
+                snack(self.page,
+                      "تم مسح الحركات وحفظ نسخة احتياطية تلقائية.",
+                      kind="success")
+            except Exception as ex:
+                snack(self.page, str(ex), kind="error")
+
+        confirm_dialog(
+            self.page, "مسح بيانات النظام",
+            "سيتم مسح جميع الحركات (فواتير، مشتريات، مصروفات، مخزون) "
+            "مع أخذ نسخة احتياطية تلقائية قبل المسح. "
+            "المستخدمون والموردون والمنتجات وأرقام الفواتير تبقى "
+            "محفوظة. هل تريد المتابعة؟",
+            do_clear, confirm_text="مسح البيانات", danger=True)
+
+    def _update(self):
+        try:
+            self.container.update()
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# MAIN LAYOUT
+# ===========================================================================
+
+NAV_ITEMS = [
+    ("dashboard", "لوحة التحكم",    ft.icons.DASHBOARD,      False),
+    ("pos",       "نقطة البيع",     ft.icons.POINT_OF_SALE,  False),
+    ("sales",     "المبيعات",        ft.icons.RECEIPT,        False),
+    ("inventory", "المخزون",         ft.icons.INVENTORY_2,    False),
+    ("purchases", "المشتريات",       ft.icons.SHOPPING_BAG,   False),
+    ("suppliers", "الموردون",        ft.icons.LOCAL_SHIPPING, False),
+    ("expenses",  "المصروفات",       ft.icons.RECEIPT_LONG,   False),
+    ("seasons",   "المواسم",         ft.icons.CALENDAR_MONTH, True),
+    ("reports",   "التقارير",        ft.icons.BAR_CHART,      True),
+    ("settings",  "الإعدادات",       ft.icons.SETTINGS,       True),
+]
+
+
+class MainLayout:
+    def __init__(self, app, page, user):
+        self.app = app
+        self.page = page
+        self.user = user
+        self.is_admin = user["role"] == ROLE_ADMIN
+        self.content_area = ft.Container(expand=True, padding=SP_LG)
+        self.sidebar_col = ft.Column(spacing=4, expand=True,
+                                     scroll=ft.ScrollMode.AUTO)
+        self.current_key = None
+
+    def build(self):
+        sidebar = self._build_sidebar()
+        header = self._build_header()
+        body = ft.Column(
+            [header,
+             ft.Container(content=self.content_area, expand=True,
+                          bgcolor=BG_BLACK)],
+            spacing=0, expand=True)
+        root = ft.Row([sidebar,
+                       ft.Container(content=body, expand=True)],
+                      spacing=0, expand=True)
+        self._render_sidebar()
+        self.navigate("dashboard")
+        return root
+
+    def _build_sidebar(self):
+        brand = ft.Container(
+            content=ft.Row(
+                [ft.Container(
+                    content=ft.Icon(ft.icons.STOREFRONT, size=18,
+                                    color=BG_BLACK),
+                    width=36, height=36, bgcolor=ACCENT,
+                    border_radius=RADIUS_SM,
+                    alignment=ft.alignment.center),
+                 ft.Column(
+                     [ft.Text("SIERRA", color=TEXT_PRIMARY, size=16,
+                              weight=ft.FontWeight.W_900),
+                      ft.Text("STORE", color=TEXT_MUTED, size=FS_TINY,
+                              weight=ft.FontWeight.W_700)],
+                     spacing=0, tight=True)],
+                spacing=SP_SM),
+            padding=ft.padding.symmetric(horizontal=SP_MD,
+                                         vertical=SP_MD))
+        return ft.Container(
+            content=ft.Column(
+                [brand, divider(),
+                 ft.Container(content=self.sidebar_col, padding=SP_SM,
+                              expand=True),
+                 divider(), self._build_user_box()],
+                spacing=0, expand=True),
+            width=SIDEBAR_WIDTH, bgcolor=BG_SIDEBAR,
+            border=ft.border.only(right=ft.BorderSide(1, BORDER)),
+            expand=False)
+
+    def _render_sidebar(self):
+        self.sidebar_col.controls.clear()
+        for key, label, icon, admin_only in NAV_ITEMS:
+            if admin_only and not self.is_admin:
+                continue
+            self.sidebar_col.controls.append(
+                self._nav_item(key, label, icon))
+
+    def _nav_item(self, key, label, icon):
+        is_active = self.current_key == key
+
+        def _click(e, k=key):
+            self.navigate(k)
+
+        c = ft.Container(
+            content=ft.Row(
+                [ft.Icon(icon, size=16,
+                         color=(TEXT_PRIMARY if is_active
+                                else TEXT_SECONDARY)),
+                 ft.Text(label, size=FS_BODY,
+                         color=(TEXT_PRIMARY if is_active
+                                else TEXT_SECONDARY),
+                         weight=(ft.FontWeight.W_600 if is_active
+                                 else ft.FontWeight.W_500))],
+                spacing=SP_SM),
+            padding=ft.padding.symmetric(horizontal=SP_MD, vertical=10),
+            border_radius=RADIUS_SM,
+            bgcolor=BG_CARD if is_active else "transparent",
+            on_click=_click, ink=True)
+        if not is_active:
+            c.on_hover = self._make_nav_hover(key)
+        return c
+
+    def _make_nav_hover(self, key):
+        def handler(e):
+            if self.current_key == key:
+                return
+            active = e.data == "true"
+            e.control.bgcolor = BG_CARD_HOVER if active else "transparent"
+            e.control.update()
+        return handler
+
+    def _build_user_box(self):
+        role_label = "مسؤول" if self.is_admin else "كاشير"
+        return ft.Container(
+            content=ft.Column(
+                [ft.Row(
+                    [ft.Container(
+                        content=ft.Text(
+                            (self.user["username"] or "?")[0].upper(),
+                            color=TEXT_PRIMARY, size=FS_SMALL,
+                            weight=ft.FontWeight.W_800),
+                        width=32, height=32, bgcolor=BG_CARD,
+                        border_radius=999,
+                        alignment=ft.alignment.center),
+                     ft.Column(
+                         [ft.Text(self.user["username"],
+                                  color=TEXT_PRIMARY, size=FS_SMALL,
+                                  weight=ft.FontWeight.W_700),
+                          ft.Text(role_label, color=TEXT_MUTED,
+                                  size=FS_TINY)],
+                         spacing=0, tight=True)],
+                    spacing=SP_SM),
+                 ft.Container(height=SP_SM),
+                 ft.Container(
+                     content=ft.Row(
+                         [ft.Icon(ft.icons.LOGOUT, size=14,
+                                  color=DANGER),
+                          ft.Text("تسجيل الخروج", color=DANGER,
+                                  size=FS_SMALL,
+                                  weight=ft.FontWeight.W_600)],
+                         spacing=6),
+                     padding=ft.padding.symmetric(horizontal=SP_SM,
+                                                  vertical=8),
+                     border_radius=RADIUS_SM,
+                     on_click=lambda e: self.app.logout(),
+                     ink=True, on_hover=_hover_danger)],
+                spacing=0),
+            padding=SP_SM)
+
+    def _build_header(self):
+        now = ft.Text("", color=TEXT_SECONDARY, size=FS_SMALL)
+        season_text = ft.Text("", color=SUCCESS, size=FS_SMALL,
+                              weight=ft.FontWeight.W_600)
+
+        def _tick():
+            try:
+                now.value = datetime.now().strftime(
+                    "%A، %d %B %Y  •  %H:%M:%S")
+                active = get_active_season()
+                season_text.value = (f"الموسم: {active['season_name']}"
+                                     if active else "")
+                now.update()
+                season_text.update()
+            except Exception:
+                pass
+
+        _tick()
+        try:
+            self.page.run_task(self._clock_loop, now, season_text)
+        except Exception:
+            pass
+
+        return ft.Container(
+            content=ft.Row(
+                [ft.Column(
+                    [ft.Text("SIERRA STORE", color=TEXT_PRIMARY,
+                             size=20, weight=ft.FontWeight.W_900),
+                     ft.Text("نظام إدارة متجر الملابس بالجملة",
+                             color=TEXT_MUTED, size=FS_TINY)],
+                    spacing=0, tight=True),
+                 ft.Container(expand=True),
+                 season_text,
+                 ft.Container(width=SP_MD),
+                 ft.Container(
+                     content=now,
+                     padding=ft.padding.symmetric(horizontal=12,
+                                                  vertical=6),
+                     bgcolor=BG_CARD,
+                     border=ft.border.all(1, BORDER),
+                     border_radius=RADIUS_SM)],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.padding.symmetric(horizontal=SP_LG, vertical=12),
+            bgcolor=BG_HEADER,
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
+            height=HEADER_HEIGHT)
+
+    async def _clock_loop(self, target, season_target):
+        import asyncio
+        while True:
+            await asyncio.sleep(1)
+            try:
+                target.value = datetime.now().strftime(
+                    "%A، %d %B %Y  •  %H:%M:%S")
+                active = get_active_season()
+                season_target.value = (
+                    f"الموسم: {active['season_name']}" if active else "")
+                target.update()
+                season_target.update()
+            except Exception:
+                return
+
+    def navigate(self, key):
+        if key == self.current_key:
+            return
+        for k, _l, _i, admin_only in NAV_ITEMS:
+            if k == key and admin_only and not self.is_admin:
+                snack(self.page,
+                      "لا تملك صلاحية الوصول إلى هذا القسم.",
+                      kind="error")
+                return
+        self.current_key = key
+        self._render_sidebar()
+        view = self._make_view(key)
+        if view is None:
+            self.content_area.content = ft.Text("الصفحة غير موجودة",
+                                                color=TEXT_MUTED)
+        else:
+            self.content_area.content = view.build()
+        try:
+            self.content_area.update()
+            self.sidebar_col.update()
+        except Exception:
+            pass
+
+    def _make_view(self, key):
+        if key == "dashboard":
+            return DashboardView(self.app, self.page, self.user)
+        if key == "pos":
+            return POSView(self.app, self.page, self.user)
+        if key == "sales":
+            return SalesView(self.app, self.page, self.user)
+        if key == "inventory":
+            return InventoryView(self.app, self.page, self.user)
+        if key == "purchases":
+            return PurchasesView(self.app, self.page, self.user)
+        if key == "suppliers":
+            return SuppliersView(self.app, self.page, self.user)
+        if key == "expenses":
+            return ExpensesView(self.app, self.page, self.user)
+        if key == "seasons":
+            return SeasonsView(self.app, self.page, self.user)
+        if key == "reports":
+            return ReportsView(self.app, self.page, self.user)
+        if key == "settings":
+            return SettingsView(self.app, self.page, self.user)
+        return None
+
+
+# ===========================================================================
+# APPLICATION CONTROLLER
+# ===========================================================================
+
+class SierraApp:
+    def __init__(self, page):
+        self.page = page
+        self.user = None
+        self._setup_page()
+        initialize_database()
+        self.show_login()
+
+    def _setup_page(self):
+        self.page.title = "SIERRA STORE"
+        self.page.theme_mode = ft.ThemeMode.DARK
+        self.page.bgcolor = BG_BLACK
+        self.page.padding = 0
+        self.page.spacing = 0
+        try:
+            self.page.theme = ft.Theme(font_family="Cairo")
+        except Exception:
+            pass
+        try:
+            self.page.window.width = 1440
+            self.page.window.height = 900
+            self.page.window.min_width = 1100
+            self.page.window.min_height = 700
+        except Exception:
+            try:
+                self.page.window_width = 1440
+                self.page.window_height = 900
+            except Exception:
+                pass
+
+    def show_login(self):
+        self.page.controls.clear()
+        self.page.add(LoginView(self, self.page).build())
+        self.page.update()
+
+    def on_login_success(self, user):
+        self.user = user
+        self.show_main()
+
+    def show_main(self):
+        if not self.user:
+            self.show_login()
+            return
+        self.page.controls.clear()
+        self.page.add(MainLayout(self, self.page, self.user).build())
+        self.page.update()
+
+    def logout(self):
+        self.user = None
+        self.show_login()
+
+
+# ===========================================================================
+# ENTRY POINT
+# ===========================================================================
+
+def main(page):
+    SierraApp(page)
+
+
+if __name__ == "__main__":
+    ft.app(target=main)
