@@ -35,12 +35,11 @@ jobs:
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
-      - name: Install Flet & Serious Python
+      - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          pip install flet serious_python
+          pip install "flet[all]"
 
       - name: Build APK
         run: flet build apk --yes
