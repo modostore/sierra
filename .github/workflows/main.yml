@@ -1,46 +1,48 @@
 name: Build Flet APK
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
+push:
+branches:
+- main
+workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+build:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v4
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev mesa-utils ninja-build cmake
+  - name: Install System Dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y libgtk-3-dev mesa-utils ninja-build cmake
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+  - uses: actions/setup-python@v5
+    with:
+      python-version: '3.10'
 
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+  - uses: actions/setup-java@v4
+    with:
+      java-version: '17'
+      distribution: 'temurin'
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.x'
+  - uses: subosito/flutter-action@v2
+    with:
+      flutter-version: '3.22.x'
 
-      - name: Accept Android Licenses
-        run: yes | flutter doctor --android-licenses || true
+  - name: Accept Android Licenses & Setup
+    run: |
+      yes | flutter doctor --android-licenses || true
+      flutter config --no-analytics
 
-      - name: Install Flet
-        run: pip install flet
+  - name: Install Flet
+    run: pip install flet
 
-      - name: Build APK
-        run: flet build apk --yes
+  - name: Build APK
+    run: flet build apk -v
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sierra-APK
-          path: build/apk/*.apk
+  - name: Upload Artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: Sierra-APK
+      path: build/apk/*.apk
