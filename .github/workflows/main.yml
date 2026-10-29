@@ -30,18 +30,22 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      - name: Setup Android NDK & Licenses
+      - name: Accept Android Licenses & Install NDK
         run: |
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          pip install "flet[all]"
+          pip install flet
 
       - name: Build APK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
         run: flet build apk --yes
 
       - name: Upload Artifact
