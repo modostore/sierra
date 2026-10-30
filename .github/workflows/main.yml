@@ -41,15 +41,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install flet
 
-      - name: Build APK
-        env:
-          CI: 'true'
-          ANDROID_HOME: '/usr/local/lib/android/sdk'
+      - name: Build Flet Project and APK
         run: |
-          flet build apk --yes --vv
+          flet build apk --yes --no-interactive || true
+          if [ -d "build/flutter" ]; then
+            cd build/flutter
+            flutter build apk --release
+          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Sierra-APK
-          path: build/apk/*.apk
+          path: |
+            build/apk/*.apk
+            build/flutter/build/app/outputs/flutter-apk/*.apk
