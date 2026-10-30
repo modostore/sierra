@@ -44,6 +44,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.3'
+          cache: true
 
       - name: Setup Android Environment
         run: |
@@ -59,8 +60,6 @@ jobs:
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
-          FLUTTER_ROOT: /opt/hostedtoolcache/flutter/stable-3.22.3-x64/flutter
-          PATH: /opt/hostedtoolcache/flutter/stable-3.22.3-x64/flutter/bin:/opt/hostedtoolcache/flutter/stable-3.22.3-x64/flutter/bin/cache/dart-sdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
           CI: "true"
         run: |
           flet build apk -v
