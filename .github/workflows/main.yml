@@ -1,4 +1,4 @@
-name: Build Flet APK
+ame: Build Flet APK
 
 on:
   push:
@@ -46,7 +46,7 @@ jobs:
           ANDROID_HOME: /usr/local/lib/android/sdk
           CI: "true"
         run: |
-          flet build apk --no-cache -v
+          flet build apk -v
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
