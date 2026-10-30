@@ -15,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev mesa-utils ninja-build cmake
+          sudo apt-get install -y libgtk-3-dev mesa-utils ninja-build cmake build-essential
 
       - uses: actions/setup-python@v5
         with:
@@ -35,15 +35,17 @@ jobs:
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "build-tools;34.0.0"
 
       - name: Install Compatible Flet
         run: |
           python -m pip install --upgrade pip
-          pip install "flet==0.21.2"
+          pip install "flet==0.21.2" serious-python
 
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
           CI: "true"
         run: |
           flet build apk -v
