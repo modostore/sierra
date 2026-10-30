@@ -35,17 +35,15 @@ jobs:
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653" "build-tools;34.0.0"
 
       - name: Install Compatible Flet
         run: |
           python -m pip install --upgrade pip
-          pip install "flet==0.21.2" serious-python
+          pip install "flet==0.21.2"
 
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
           CI: "true"
         run: |
           flet build apk -v
