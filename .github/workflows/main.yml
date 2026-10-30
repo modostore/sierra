@@ -30,11 +30,12 @@ jobs:
         with:
           flutter-version: '3.22.3'
 
-      - name: Setup Android Environment
+      - name: Setup Android Environment & NDK
         run: |
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
       - name: Install Compatible Flet
         run: |
@@ -44,6 +45,7 @@ jobs:
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
           CI: "true"
         run: |
           flet build apk -v
