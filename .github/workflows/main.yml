@@ -15,7 +15,18 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev mesa-utils ninja-build cmake build-essential libssl-dev libffi-dev libsqlite3-dev zlib1g-dev libbz2-dev liblzma-dev
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            mesa-utils \
+            ninja-build \
+            cmake \
+            build-essential \
+            libssl-dev \
+            libffi-dev \
+            libsqlite3-dev \
+            zlib1g-dev \
+            libbz2-dev \
+            liblzma-dev
 
       - uses: actions/setup-python@v5
         with:
