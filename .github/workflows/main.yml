@@ -45,12 +45,11 @@ jobs:
         with:
           flutter-version: '3.22.3'
 
-      - name: Setup Android Environment & NDK
+      - name: Setup Android Environment
         run: |
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$(ls $ANDROID_HOME/ndk | head -n 1)" >> $GITHUB_ENV
 
       - name: Install Compatible Flet
         run: |
@@ -60,6 +59,8 @@ jobs:
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
+          FLUTTER_ROOT: /opt/hostedtoolcache/flutter/stable-3.22.3-x64
+          PATH: /opt/hostedtoolcache/flutter/stable-3.22.3-x64/bin:/opt/hostedtoolcache/flutter/stable-3.22.3-x64/bin/cache/dart-sdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
           CI: "true"
         run: |
           flet build apk -v
