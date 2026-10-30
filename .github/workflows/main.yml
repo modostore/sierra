@@ -44,10 +44,14 @@ jobs:
       - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
-        run: flet build apk -v
+          CI: "true"
+        run: |
+          flet build apk --no-cache -v
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Sierra-APK
-          path: build/apk/*.apk
+          path: |
+            build/apk/*.apk
+            build/flutter/build/app/outputs/flutter-apk/*.apk
