@@ -26,7 +26,11 @@ jobs:
             libsqlite3-dev \
             zlib1g-dev \
             libbz2-dev \
-            liblzma-dev
+            liblzma-dev \
+            libreadline-dev \
+            libncurses5-dev \
+            libgdbm-dev \
+            tk-dev
 
       - uses: actions/setup-python@v5
         with:
