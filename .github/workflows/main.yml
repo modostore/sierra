@@ -30,12 +30,11 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      - name: Accept Android Licenses & Install NDK
+      - name: Setup Android Environment
         run: |
           yes | flutter doctor --android-licenses || true
           flutter config --no-analytics
           flutter config --enable-android
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
 
       - name: Install Flet
         run: |
@@ -44,9 +43,10 @@ jobs:
 
       - name: Build APK
         env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
-          ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/25.2.9519653
-        run: flet build apk --yes
+          CI: 'true'
+          ANDROID_HOME: '/usr/local/lib/android/sdk'
+        run: |
+          flet build apk --yes --vv
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
